@@ -16,6 +16,8 @@ function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = 
   return new Promise(res => {
     const f = document.createElement('iframe');
     f.className = 'lgh';
+    // sandbox: no top-level navigation, no popups, no downloads from the hidden page
+    f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
     f.style.cssText = vis ? 'position:fixed;left:0;top:0;width:1440px;height:900px;opacity:.01;pointer-events:none;z-index:-1;border:0'
                           : 'position:fixed;left:-3000px;top:0;width:1440px;height:900px';
     const cap = []; let hooked = false; const t0 = Date.now();
