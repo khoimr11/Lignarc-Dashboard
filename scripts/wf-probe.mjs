@@ -21,14 +21,15 @@ export default async function probe({ gql }) {
     let s = await sel('SupplierCastlegatePurchaseOrder', 1);
     const prod = await sel('SupplierCastlegatePurchaseOrderProduct', 1);
     s = s.replace(/supplierCastlegatePurchaseOrderProducts \{[^}]*\}( \})?/, '') + ` supplierCastlegatePurchaseOrderProducts { ${prod} }`;
-    s = s.replace(/supplierPurchaseOrderCustomer \{[^}]*\}/, 'supplierPurchaseOrderCustomer { state country }').replace(/supplierPurchaseOrderShipTo \{[^}]*\}/, '').replace(/supplierPurchaseOrderBillTo \{[^}]*\}/, '');
+    s = s.replace(/supplierPurchaseOrderCustomer \{[^}]*\}/, '')
+      .replace(/supplierPurchaseOrderPackingSlipUrl \{[^}]*\}/, '').replace(/supplierPurchaseOrderShipTo \{[^}]*\}/, '').replace(/supplierPurchaseOrderBillTo \{[^}]*\}/, '');
     P('selection', s.slice(0, 1500));
     const it = await gql(ORDER_API, '{__type(name:"SupplierPurchaseOrdersDateTimeIntervalInput"){inputFields{name}}}');
     const keys = ((it.data && it.data.__type && it.data.__type.inputFields) || []).map(f => f.name); P('interval keys', keys.join(','));
     const [kA, kB] = keys.length >= 2 ? keys : ['start', 'end'];
     const all = [];
     for (const hasResponse of [true, false]) for (let page = 1; page < 20; page++) {
-      const r = await gql(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput, $p: Int, $ps: Int){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:$p, pageSize:$ps){ totalCount pageInfo { hasNextPage } nodes { ${s} } } }`,
+      const r = await gql(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput!, $p: Int!, $ps: Int!){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:$p, pageSize:$ps){ totalCount pageInfo { hasNextPage } nodes { ${s} } } }`,
         { i: { filter: { hasResponse, purchaseOrderDateTimeInterval: { [kA]: '2026-10-01T00:00:00Z', [kB]: new Date(Date.now() + 864e5).toISOString() } } }, p: page, ps: 50 });
       if (r.errors) { P('err', hasResponse, JSON.stringify(r.errors).slice(0, 700)); break; }
       const c = r.data.castlegatePurchaseOrders; all.push(...(c.nodes || []));
