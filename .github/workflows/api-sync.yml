@@ -1,5 +1,7 @@
 name: Daily API sync
 on:
+  push:
+    paths: ['.github/sync-trigger']
   schedule:
     - cron: '23 7 * * *'   # 14:23 Asia/Saigon
   workflow_dispatch:

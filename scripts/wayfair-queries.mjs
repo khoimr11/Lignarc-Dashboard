@@ -12,6 +12,10 @@ const ORDERS_FROM = process.env.WF_ORDERS_FROM || '2026-07-01T00:00:00Z';
 const ADS_FROM = process.env.WF_ADS_FROM || '2026-09-01';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const day = s => (s ? String(s).slice(0, 10) : null);
+// '2026-11-12 06:32:11.000000 +00:00' -> Date
+const parseTs = s => { if (!s) return null; const m = String(s).match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*([+-]\d{2}):?(\d{2})?/); const d = m ? new Date(`${m[1]}T${m[2]}${m[3]}:${m[4] || '00'}`) : new Date(s); return isNaN(d) ? null : d; };
+const ET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+const etDay = s => { const d = parseTs(s); return d ? ET.format(d) : day(s); };
 
 const Q_INV = `query inventorySummaryList($supplierId: Int!, $filter: InventoryFilterInput, $page: InventoryPageInput) {
   inventorySummaryList(supplierId: $supplierId, filter: $filter, page: $page) {
@@ -86,17 +90,8 @@ export default async function wayfair({ gql, http, tok }) {
     return res;
   });
 
-  // 3a) order status per PO (Shipped / Allocated / Rejected …) — the PO feed itself has no status
+  // 3a) order status: soCastlegateOrders currently fails server-side (null) — statuses come from manual overrides (wf.statusOv)
   const status = new Map();
-  await step('statuses', async () => {
-    for (let page = 1; page <= 40; page++) {
-      const d = await q(ORDER_API, Q_STATUS, { filters: { includePendingOrders: true, supplierId: String(SUPPLIER_ID), orderSource: ['SINGLE_CHANNEL'], page, pageSize: 100, orderCreationDateTimeInterval: { from: ORDERS_FROM, to: new Date(Date.now() + 864e5).toISOString() } } });
-      const L = d.soCastlegateOrders.orderListByFilters; const nodes = L.nodes || [];
-      for (const n of nodes) { const pos = Array.isArray(n.retailerPurchaseOrderNumbers) ? n.retailerPurchaseOrderNumbers : String(n.retailerPurchaseOrderNumbers || '').split(/[,\s]+/); for (const po of pos) if (po) status.set(po, { st: n.orderStatus, shipped: day(n.shippingDate), retailer: n.retailerName }); }
-      if (page >= ((L.pageInfo && L.pageInfo.totalPages) || 1)) break;
-    }
-    return [...status.keys()];
-  });
   // 3b) CastleGate customer orders (both acknowledged and not yet acknowledged)
   await step('orders', async () => {
     const seen = new Map();
@@ -110,9 +105,10 @@ export default async function wayfair({ gql, http, tok }) {
           if (o.poDate && o.poDate > newest) newest = o.poDate;
           for (const p of o.products || []) {
             const qty = num(p.quantity), key = o.poNumber + '|' + p.partNumber;
-            // [po, orderNo, date, status, retailer, state, country, part, sku, name, options, qty, unit wholesale, b2b, sales channel, shipped, warehouse]
+            // [po, orderNo, date (US Eastern), status, retailer, state, country, part, sku, name, options, qty, unit wholesale, b2b, sales channel, shipped, warehouse, PO timestamp UTC]
             const S = status.get(o.poNumber) || {}; const label = p.isCancelled ? 'Cancelled' : S.st ? S.st.charAt(0) + S.st.slice(1).toLowerCase().replace(/_/g, ' ') : 'Open';
-            seen.set(key, [o.poNumber, String(o.orderId || ''), day(o.poDate), label, S.retailer || (/^CA/i.test(o.storePrefix || '') ? 'Wayfair.ca' : 'Wayfair'), o.customerState || '', o.customerCountry || '', p.partNumber, p.sku || '', '', '', qty, p.price != null ? num(p.price) : (qty ? num(p.totalCost) / qty : 0), /b2b/i.test(o.orderType || '') ? 'Yes' : 'No', o.salesChannelName || '', S.shipped || null, (o.warehouse && o.warehouse.name) || '']);
+            const ts = parseTs(o.poDate);
+            seen.set(key, [o.poNumber, String(o.orderId || ''), etDay(o.poDate), label, S.retailer || (/^CA/i.test(o.storePrefix || '') ? 'Wayfair.ca' : 'Wayfair'), o.customerState || '', o.customerCountry || '', p.partNumber, p.sku || '', '', '', qty, p.price != null ? num(p.price) : (qty ? num(p.totalCost) / qty : 0), /b2b/i.test(o.orderType || '') ? 'Yes' : 'No', o.salesChannelName || '', S.shipped || null, (o.warehouse && o.warehouse.name) || '', ts ? ts.toISOString() : null]);
           }
         }
         if (L.length < 100 || newest === from) break; from = newest; await sleep(300);
@@ -147,6 +143,29 @@ export default async function wayfair({ gql, http, tok }) {
     }
     const daily = [...agg.values()].map(r => r.map((v, i) => i > 1 ? Math.round(v * 100) / 100 : v));
     return { camps: [...camps.values()], daily, wallet: null, columns: head, sample: R.slice(1, 4) };
+  });
+
+  // 5) Advertising by listing (SKU_REPORT): spend / sales per Wayfair listing per day, used to put ad cost on SKUs
+  await step('adsSku', async () => {
+    const H = { Authorization: 'Bearer ' + tok, 'content-type': 'application/json' };
+    const end = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+    const rep = await http(ADS_API + '/reports', { method: 'POST', headers: H, body: JSON.stringify({ name: 'lignarc-sku-' + end, reportType: 'SKU_REPORT', groupBy: 'DAY', program: 'WSP', fileType: 'CSV', filters: { startDate: ADS_FROM, endDate: end }, attributionWindow: 14, supplierId: SUPPLIER_ID }) });
+    const id = rep.id || rep.reportId; let st = {};
+    for (let i = 0; i < 60; i++) { await sleep(10000); st = await http(ADS_API + '/reports?reportId=' + encodeURIComponent(id), { headers: H }); if (st.status === 'COMPLETED' && st.url) break; if (/FAIL/i.test(st.status || '')) throw new Error('sku report ' + st.status); }
+    if (!st.url) throw new Error('sku report not ready');
+    const R = csv((await (await fetch(st.url)).text()).replace(/^\uFEFF/, '').trim()); const head = R[0].map(h => h.trim().toLowerCase());
+    const ix = re => head.findIndex(h => re.test(h));
+    const c = { date: ix(/^date$/), listing: ix(/^listing$/), parts: ix(/part_numbers/), impr: ix(/^impressions$/), clicks: ix(/^clicks$/), spend: ix(/^spend/), sales: ix(/attributed_retail_sales/), orders: ix(/attributed_orders/), units: ix(/attributed_units/) };
+    if (c.date < 0 || c.listing < 0 || c.spend < 0) throw new Error('unexpected sku report columns: ' + head.join('|'));
+    const agg = new Map(), parts = {};
+    for (const r of R.slice(1)) {
+      if (r.length < 5) continue; const k = r[c.date] + '|' + r[c.listing];
+      const row = agg.get(k) || [r[c.date], r[c.listing], 0, 0, 0, 0, 0, 0];
+      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += num(r[c.sales]); row[6] += num(r[c.orders]); row[7] += num(r[c.units]); agg.set(k, row);
+      if (c.parts >= 0) parts[r[c.listing]] = String(r[c.parts]).split(/,\s*/).filter(Boolean);
+    }
+    // [date, listing, impressions, clicks, spend, attributed retail sales, orders, units]
+    return { daily: [...agg.values()].map(r => r.map((v, i) => i > 1 ? Math.round(v * 100) / 100 : v)), parts };
   });
 
   if (Object.keys(err).length) out.err = err;
