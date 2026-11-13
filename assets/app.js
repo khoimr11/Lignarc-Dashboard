@@ -55,7 +55,7 @@ const sum = (a, f = x => x) => a.reduce((s, x) => s + (+f(x) || 0), 0);
 const groupBy = (a, f) => { const m = new Map(); for (const x of a) { const k = f(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); } return m; };
 const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const SER = () => [cssv('--s1'), cssv('--s2'), cssv('--s3'), cssv('--s4'), cssv('--s5')];
-const sizeLbl = s => s ? s + '"' : '—';
+const sizeLbl = s => s && s !== 'null' ? s + '"' : 'Rolling Cart';
 const ET_FMT = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23', weekday: 'short' });
 const etHourDow = iso => { const p = Object.fromEntries(ET_FMT.formatToParts(new Date(iso)).map(x => [x.type, x.value])); return { h: (+p.hour) % 24, dow: DOW.indexOf(p.weekday) }; };
 const tipRows = (title, rows) => `<b>${esc(title)}</b>` + rows.map(([k, v, c]) => `<div><span>${c ? `<i style="background:${c}"></i>` : ''}${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
@@ -73,14 +73,16 @@ const S = { tab: 'overview', preset: '30d', from: null, to: null, compare: true,
 const OK_STATUS = s => !/cancel|reject|void/i.test(s || '');
 function build() {
   const P = D.products || {};
-  const A = Object.assign({ platformFee: 0.10, dda: 0.025, returns: 0.013, castlegate: 0.015, amazonFee: 0.15 }, D.assump || {});
+  for (const p of Object.values(P)) if (p.color === 'Walnut') p.color = 'Dark Oak';   // one dark finish: Walnut = Dark Oak
+  const A = Object.assign({ dda: 0.04, wmr: 0.75, ttReimburseDDA: true, amazonFee: 0.15 }, D.assump || {});
+  const CG = D.cgFees || {}, cgFee = part => (CG.actual && CG.actual[part] != null) ? CG.actual[part] : ((CG.est && CG.est[part]) || 0);
   const W = D.wf || {}, inbById = new Map((W.inb || []).map(x => [x.id, x]));
   const recvOf = po => (W.inbRecv && W.inbRecv[po.whs]) || po.recv || (inbById.get(po.whs) && (inbById.get(po.whs).recvStart || inbById.get(po.whs).gatedOut)) || null;
   const pos = (D.pos || []).map(p => ({ ...p, recv: recvOf(p) ? String(recvOf(p)).slice(0, 10) : null, inb: inbById.get(p.whs) || null }))
     .sort((a, b) => (a.recv || '9999').localeCompare(b.recv || '9999'));
-  // FIFO cost layers per SKU, in receiving order
+  // FIFO cost layers per SKU, in receiving order; landed cost per unit = PO cost sheet + CastleGate container unload
   const layers = {};
-  for (const po of pos) for (const [part, qty, fob, cogs] of po.items || []) (layers[part] = layers[part] || []).push({ po: po.id, qty, left: qty, fob, cogs, recv: po.recv });
+  for (const po of pos) for (const [part, qty, fob, cogs] of po.items || []) { const un = (po.unload && po.unload[part]) || 0; (layers[part] = layers[part] || []).push({ po: po.id, qty, left: qty, fob, cogs: cogs + un, sheet: cogs, unload: un, recv: po.recv }); }
   const lastCost = part => { const L = layers[part]; if (L && L.length) return L[L.length - 1]; const fam = P[part] && P[part].fam; for (const k in layers) if (P[k] && P[k].fam === fam) return layers[k][layers[k].length - 1]; return { cogs: 0, fob: 0 }; };
   const prod = part => P[part] || { col: 'Other', cat: 'Other', type: 'Other', size: null, color: null, name: part, base: 0 };
   const SOV = W.statusOv || {}, TT = new Set(W.ttPOs || []);
@@ -91,26 +93,29 @@ function build() {
     lines.push({ ch: 'wf', po: r[0], date: r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
   }
   for (const r of (D.amz && D.amz.orders) || []) {
-    const p = prod(r[3]); const qty = +r[5] || 0, price = +r[6] || 0;
+    const qty = +r[5] || 0, price = +r[6] || 0;
     lines.push({ ch: 'amz', po: r[0], date: r[1], ts: null, hour: null, dow: null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: '', country: 'US', part: r[3], qty, price, base: price, b2b: false, tt: false });
   }
   lines.sort((a, b) => (a.ts || a.date + 'T12').localeCompare(b.ts || b.date + 'T12'));
   // split each order line into FIFO pieces (Tried & True units ship from the same stock, so they consume layers too)
   const pieces = [];
   const mk = (l, q, ly) => {
-    const p = prod(l.part), rev = l.base * q, net = l.price * q;
-    const fee = l.ch === 'amz' ? net * A.amazonFee : net * A.platformFee;
-    return { ...l, qty: q, layer: ly.po, unitCogs: ly.cogs, unitFob: ly.fob, rev, net, promo: rev - net, cogs: ly.cogs * q, fob: ly.fob * q, fee, dda: l.ch === 'wf' ? net * A.dda : 0, ret: rev * A.returns, cg: l.ch === 'wf' ? rev * A.castlegate : 0,
+    const p = prod(l.part), wf = l.ch === 'wf';
+    // Tried & True: Wayfair pays no wholesale — only the DDA amount comes back; units still cost COGS + fulfillment
+    const rev = l.tt ? 0 : l.base * q, paid = l.price * q, net = l.tt ? (A.ttReimburseDDA ? paid * A.dda : 0) : paid;
+    return { ...l, qty: q, layer: ly.po, unitCogs: ly.cogs, unitFob: ly.fob, rev, net, promo: l.tt ? 0 : rev - net, cogs: ly.cogs * q, fob: ly.fob * q,
+      dda: wf && !l.tt ? paid * A.dda : 0, cg: wf ? cgFee(l.part) * q : 0, cgEst: wf && !(CG.actual && CG.actual[l.part] != null), amzFee: wf ? 0 : net * A.amazonFee,
       col: p.col, cat: p.cat, type: p.type, size: p.size, color: p.color, name: p.name, fam: p.fam };
   };
   for (const l of lines) {
-    if (!l.ok) { pieces.push({ ...mk(l, l.qty, { po: '—', cogs: 0, fob: 0 }), rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, fee: 0, dda: 0, ret: 0, cg: 0, units0: l.qty }); continue; }
+    if (!l.ok) { pieces.push({ ...mk(l, l.qty, { po: '—', cogs: 0, fob: 0 }), rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0 }); continue; }
     let q = l.qty; const L = layers[l.part] || [];
     if (l.ch === 'wf') for (const ly of L) { if (q <= 0) break; if (ly.left <= 0) continue; const t = Math.min(q, ly.left); ly.left -= t; q -= t; pieces.push(mk(l, t, ly)); }
     if (q > 0) { const lc = lastCost(l.part); pieces.push(mk(l, q, { po: l.ch === 'amz' ? 'Amazon stock' : 'Unassigned', cogs: lc.cogs, fob: lc.fob })); }
   }
+  const deds = (D.deductions || []).map(d => ({ ...d, ch: 'wf' }));
   const dates = lines.map(l => l.date).filter(Boolean).sort();
-  M = { P, A, pos, layers, lines, pieces, first: dates[0] || D.meta.today, today: (D.meta && D.meta.today) || new Date().toISOString().slice(0, 10) };
+  M = { P, A, CG, cgFee, pos, layers, lines, pieces, deds, first: dates[0] || D.meta.today, today: (D.meta && D.meta.today) || new Date().toISOString().slice(0, 10) };
   M.listingParts = {}; for (const [k, p] of Object.entries(P)) if (p.fam) (M.listingParts[p.fam] = M.listingParts[p.fam] || []).push(k);
 }
 
@@ -136,15 +141,24 @@ function passProd(part) {
 }
 // pieces passing every filter except the date range
 function basePieces({ includeBad = false, ignoreTT = false, ignoreProd = false, ignorePO = false } = {}) {
-  return M.pieces.filter(x => (includeBad || x.ok) && (S.platform === 'all' || x.ch === S.platform) && (ignoreTT || S.incTT || !x.tt) && (ignoreProd || passProd(x.part)) && (ignorePO || !S.f.po.size || S.f.po.has(x.layer)));
+  return M.pieces.filter(x => (includeBad || x.ok) && (S.platform === 'all' || x.ch === S.platform) && (ignoreProd || passProd(x.part)) && (ignorePO || !S.f.po.size || S.f.po.has(x.layer)));
 }
 const inRange = (x, f, t) => x.date >= f && x.date <= t;
 function agg(ps) {
-  const o = { units: 0, rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, fee: 0, dda: 0, ret: 0, cg: 0 }, orders = new Set();
-  for (const x of ps) { o.units += x.qty; o.rev += x.rev; o.net += x.net; o.promo += x.promo; o.cogs += x.cogs; o.fob += x.fob; o.fee += x.fee; o.dda += x.dda; o.ret += x.ret; o.cg += x.cg; orders.add(x.po); }
-  o.orders = orders.size; o.gmv = o.rev * 2; o.aov = o.orders ? o.rev / o.orders : 0;
-  o.gp = o.net - o.fee - o.dda - o.cogs - o.ret - o.cg;   // before ads
+  const o = { units: 0, rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0, ttUnits: 0, ttCost: 0, ttCogs: 0, ttCg: 0, ttBack: 0 }, orders = new Set(), ttOrders = new Set();
+  for (const x of ps) {
+    if (x.tt) { o.ttUnits += x.qty; o.ttCogs += x.cogs; o.ttCg += x.cg; o.ttBack += x.net; o.ttCost += x.cogs + x.cg - x.net; ttOrders.add(x.po); continue; }
+    o.units += x.qty; o.rev += x.rev; o.net += x.net; o.promo += x.promo; o.cogs += x.cogs; o.fob += x.fob; o.dda += x.dda; o.cg += x.cg; o.amzFee += x.amzFee; orders.add(x.po);
+  }
+  o.orders = orders.size; o.ttOrders = ttOrders.size; o.gmv = o.rev * 2; o.aov = o.orders ? o.rev / o.orders : 0;
+  o.platform = o.dda + o.cg + o.amzFee;                       // what the platform takes: DDA 4% + CastleGate fulfillment (+ Amazon fees)
+  o.gp = o.net - o.platform - o.cogs - o.ttCost;              // before returns, incidents and ads
   return o;
+}
+// Wayfair deductions for returns (WMR) and incidents, by deduction date
+function deductions(f, t) {
+  const ds = S.platform === 'amz' ? [] : M.deds.filter(d => d.date >= f && d.date <= t && passProd(d.part));
+  return { list: ds, returns: sum(ds.filter(d => d.type === 'Return'), d => d.amount), incidents: sum(ds.filter(d => d.type !== 'Return'), d => d.amount), returnUnits: ds.filter(d => d.type === 'Return').length };
 }
 
 // ---------------- advertising ----------------
@@ -160,7 +174,7 @@ function ads(f, t) {
     const L = {};
     for (const r of W.adsSku || []) { if (r[0] < f || r[0] > t) continue; const x = L[r[1]] = L[r[1]] || { spend: 0, clicks: 0, impr: 0, sales: 0, orders: 0, units: 0 }; x.impr += r[2]; x.clicks += r[3]; x.spend += r[4]; x.sales += r[5]; x.orders += r[6]; x.units += r[7]; }
     const skuTotal = sum(Object.values(L), x => x.spend), k = skuTotal > 0 ? out.spend / skuTotal : 0;
-    const netBy = {}; for (const x of basePieces({ ignoreProd: true, ignorePO: true })) if (x.ch === 'wf' && inRange(x, f, t)) netBy[x.part] = (netBy[x.part] || 0) + x.net;
+    const netBy = {}; for (const x of basePieces({ ignoreProd: true, ignorePO: true })) if (x.ch === 'wf' && !x.tt && inRange(x, f, t)) netBy[x.part] = (netBy[x.part] || 0) + x.net;
     for (const [lid, x] of Object.entries(L)) {
       const spend = x.spend * k; out.byListing[lid] = { ...x, spend };
       const kids = M.listingParts[lid] || [];
@@ -184,9 +198,11 @@ function ads(f, t) {
 
 // period summary with profit
 function period(f, t) {
-  const ps = basePieces().filter(x => inRange(x, f, t)); const a = agg(ps), ad = ads(f, t);
-  a.ads = ad.filtered; a.profit = a.gp - a.ads; a.margin = a.rev ? a.profit / a.rev : null; a.tacos = a.rev ? a.ads / a.rev : null; a.costs = a.rev - a.profit;
-  return { ps, a, ad };
+  const all = basePieces().filter(x => inRange(x, f, t)), ps = all.filter(x => !x.tt), a = agg(all), ad = ads(f, t), dd = deductions(f, t);
+  a.ads = ad.filtered; a.returns = dd.returns; a.incidents = dd.incidents; a.returnUnits = dd.returnUnits;
+  a.mkt = a.promo + a.ads; a.mktPct = a.rev ? a.mkt / a.rev : null;
+  a.profit = a.gp - a.returns - a.incidents - a.ads; a.margin = a.rev ? a.profit / a.rev : null; a.tacos = a.rev ? a.ads / a.rev : null; a.costs = a.rev - a.profit;
+  return { ps, all, a, ad, dd };
 }
 function target(key, f, t) {
   const K = D.kpi; if (!K || !K[key]) return null; let v = 0;
@@ -196,14 +212,14 @@ function target(key, f, t) {
 
 // ---------------- chart primitives (SVG strings) ----------------
 // charts are drawn at the card's real pixel width so text stays 12px on every screen
-function CW(kind = 'full') { const v = $('#view').clientWidth || 1000, pad = innerWidth <= 860 ? 34 : 46;
-  if (kind === 'half') return Math.round((v < 760 ? v : (v - 16) / 2) - pad);
-  if (kind === 'wide') return Math.round((v < 1280 ? v : (v - 16) * 2 / 3) - pad);
-  if (kind === 'third') return Math.round((v < 1280 ? v : (v - 16) / 3) - pad);
+function CW(kind = 'full') { const v = $('#view').clientWidth || 1000, vw = innerWidth, pad = vw <= 860 ? 34 : 46;
+  if (kind === 'half') return Math.round((vw <= 760 ? v : (v - 16) / 2) - pad);
+  if (kind === 'wide') return Math.round((vw <= 1280 ? v : (v - 16) * 2 / 3) - pad);
+  if (kind === 'third') return Math.round((vw <= 1280 ? v : (v - 16) / 3) - pad);
   return Math.round(v - pad); }
 function nice(max, n = 4) { if (!(max > 0)) return { max: n, step: 1 }; const raw = max / n, mag = 10 ** Math.floor(Math.log10(raw)); const step = [1, 2, 2.5, 5, 10].find(x => x * mag >= raw) * mag; return { max: Math.ceil(max / step) * step, step }; }
 const rr = (x, y, w, h, r) => { if (h <= 0) return ''; r = Math.min(r, w / 2, h); return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; };
-function vbars(items, { fmt = n0, h = 260, w = CW('half'), colors, showVals = true, every = 1, axisFmt, series } = {}) {
+function vbars(items, { fmt = n0, h = 300, w = CW('half'), colors, showVals = true, every = 1, axisFmt, series } = {}) {
   // items: [{label, v | vs:[..], tip}] ; series: [{name,color}] for grouped bars
   if (!items.length) return '<div class="empty">No data in this period</div>';
   const C = SER(), ser = series || [{ name: '', color: (colors && colors[0]) || C[0] }], G = ser.length;
@@ -226,6 +242,50 @@ function vbars(items, { fmt = n0, h = 260, w = CW('half'), colors, showVals = tr
   s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
   return `<div class="chart">${s}</div>` + (G > 1 ? `<div class="legend">${ser.map(se => `<span><i style="background:${se.color};${se.ghost ? 'opacity:.35' : ''}"></i>${esc(se.name)}</span>`).join('')}</div>` : '');
 }
+// Units (bars, left axis) · NMV (line, right axis $) · % Mkt fee (dashed line, labelled points, own 0–max% scale)
+function combo(bk, { h = 400, w = CW('full') } = {}) {
+  if (!bk.length) return '<div class="empty">No data in this period</div>';
+  const C = SER(), cU = C[0], cN = C[2], cP = C[1];
+  const L = 46, R = 64, T = 30, B = 34, cw = w - L - R, ch = h - T - B, n = bk.length, band = cw / n, bw = Math.min(46, band * 0.58);
+  const su = nice(Math.max(...bk.map(b => b.units), 1)), sn = nice(Math.max(...bk.map(b => b.nmv), 1), su.max / su.step);
+  const pm = Math.max(0.05, ...bk.map(b => b.mktPct || 0)) * 1.15;
+  const yu = v => T + ch - v / su.max * ch, yn = v => T + ch - v / sn.max * ch, yp = v => T + ch * 0.06 + (ch * 0.94) - (v / pm) * ch * 0.94;
+  const x = i => L + band * i + band / 2;
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let v = 0; v <= su.max + 1e-9; v += su.step) s += `<line x1="${L}" x2="${w - R}" y1="${yu(v)}" y2="${yu(v)}"/><text x="${L - 8}" y="${yu(v) + 4}" text-anchor="end">${n0(v)}</text>`;
+  for (let v = 0; v <= sn.max + 1e-9; v += sn.step) s += `<text x="${w - R + 8}" y="${yn(v) + 4}">${esc(usdK(v))}</text>`;
+  s += `</g><text x="${L - 8}" y="${T - 14}" text-anchor="end" style="font-weight:650">Units</text><text x="${w - R + 8}" y="${T - 14}" style="font-weight:650">NMV</text>`;
+  const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(cw / 70))));
+  bk.forEach((b, i) => {
+    s += `<g class="hov" data-tip="${esc(tipRows(b.tipLabel || b.label, [['Units sold', n0(b.units), cU], ['NMV', usd(b.nmv), cN], ['Mkt fee', usd(b.mkt)], ['% Mkt fee / revenue', pct(b.mktPct, 1), cP], ['Revenue', usd(b.rev)]]))}"><line class="xh" x1="${x(i)}" x2="${x(i)}" y1="${T}" y2="${T + ch}"/><rect class="hit" x="${L + band * i}" y="${T}" width="${band}" height="${ch}"/>`;
+    s += `<path class="bar" d="${rr(x(i) - bw / 2, yu(b.units), bw, Math.max(0, yu(0) - yu(b.units)), 4)}" fill="${cU}" fill-opacity=".85"/>`;
+    if (b.units && n <= 31) s += `<text class="val-lbl" x="${x(i)}" y="${yu(b.units) - 6}" text-anchor="middle">${n0(b.units)}</text>`;
+    if (i % every === 0 || i === n - 1) s += `<text x="${x(i)}" y="${h - 10}" text-anchor="middle">${esc(b.label)}</text>`;
+    s += `</g>`;
+  });
+  const pts = (fy, key) => bk.map((b, i) => b[key] == null ? null : `${x(i).toFixed(1)},${fy(b[key]).toFixed(1)}`);
+  const path = arr => { let d = '', pen = false; arr.forEach(p => { if (!p) { pen = false; return; } d += (pen ? 'L' : 'M') + p; pen = true; }); return d; };
+  s += `<path d="${path(pts(yn, 'nmv'))}" fill="none" stroke="${cN}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  s += `<path d="${path(pts(yp, 'mktPct'))}" fill="none" stroke="${cP}" stroke-width="2" stroke-dasharray="6 5" stroke-linejoin="round"/>`;
+  bk.forEach((b, i) => {
+    if (b.nmv) s += `<circle cx="${x(i)}" cy="${yn(b.nmv)}" r="${n > 31 ? 2.5 : 4}" fill="${cN}" stroke="var(--glass-strong)" stroke-width="1.5" pointer-events="none"/>`;
+    if (b.mktPct != null) { s += `<circle cx="${x(i)}" cy="${yp(b.mktPct)}" r="${n > 31 ? 2 : 3.5}" fill="var(--glass-strong)" stroke="${cP}" stroke-width="2" pointer-events="none"/>`;
+      if (n <= 16) s += `<text x="${x(i)}" y="${yp(b.mktPct) - 9}" text-anchor="middle" style="fill:${cP};font-weight:650;font-size:11px" pointer-events="none">${pct(b.mktPct)}</text>`; }
+  });
+  s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${yu(0)}" y2="${yu(0)}"/></svg>`;
+  return `<div class="legend top"><span><i style="background:${cU}"></i>Units sold</span><span><i class="line" style="background:${cN}"></i>NMV (net revenue)</span><span><i class="dash" style="color:${cP}"></i>% Mkt fee / revenue</span></div><div class="chart">${s}</div>`;
+}
+function buckets(ps, ad, f, t, gran) {
+  const key = d => gran === 'month' ? d.slice(0, 7) : gran === 'week' ? addDays(d, -((new Date(d + 'T00:00:00Z').getUTCDay() + 6) % 7)) : d;
+  const lbl = k => gran === 'month' ? mLabel(k) : gran === 'week' ? 'Wk ' + dShort(k) : dShort(k);
+  const keys = [...new Set(daysOf(f, t).map(key))], m = new Map(keys.map(k => [k, { label: lbl(k), tipLabel: gran === 'week' ? 'Week of ' + dLong(k) : gran === 'month' ? mLabel(k) : dLong(k), units: 0, nmv: 0, rev: 0, promo: 0, ads: 0 }]));
+  for (const x of ps) { const b = m.get(key(x.date)); if (!b) continue; b.units += x.qty; b.nmv += x.net; b.rev += x.rev; b.promo += x.promo; }
+  for (const [d, v] of ad.daily) { const b = m.get(key(d)); if (b) b.ads += v.spend; }
+  const share = ad.spend ? ad.filtered / ad.spend : 0;
+  return [...m.values()].map(b => { b.ads *= share; b.mkt = b.promo + b.ads; b.mktPct = b.rev ? b.mkt / b.rev : null; return b; });
+}
+function autoGran(f, t) { const n = diffDays(f, t) + 1; return S.gran && S.gran !== 'auto' ? S.gran : n <= 14 ? 'day' : n <= 120 ? 'week' : 'month'; }
+const granBtns = () => `<div class="btn-row">${[['auto', 'Auto'], ['day', 'Day'], ['week', 'Week'], ['month', 'Month']].map(([k, l]) => `<button class="view-toggle" data-gran="${k}" aria-pressed="${(S.gran || 'auto') === k}">${l}</button>`).join('')}</div>`;
 function lines(xs, series, { fmt = n0, h = 260, w = CW('full'), area = true } = {}) {
   if (!xs.length) return '<div class="empty">No data in this period</div>';
   const all = series.flatMap(s => s.vals), mn = Math.min(0, ...all);
@@ -254,7 +314,7 @@ function donut(items, { fmt = n0, center, sub = 'total' } = {}) {
   items = items.filter(i => i.v > 0); const tot = sum(items, i => i.v);
   if (!tot) return '<div class="empty">No data in this period</div>';
   const C = SER(); let a = -Math.PI / 2, s = `<svg viewBox="0 0 200 200">`;
-  const R = 86, r = 60;
+  const R = 90, r = 62;
   items.forEach((it, i) => {
     const col = it.color || C[i % C.length], frac = it.v / tot, a2 = a + frac * Math.PI * 2 - (items.length > 1 ? 0.012 : 0);
     const big = a2 - a > Math.PI ? 1 : 0, p = (rad, ang) => [100 + rad * Math.cos(ang), 100 + rad * Math.sin(ang)];
@@ -284,9 +344,10 @@ function waterfall(steps, { h = 320, w = CW('full') } = {}) {
   const L = 56, R = 8, T = 22, B = 44, cw = w - L - R, ch = h - T - B, n = steps.length, band = cw / n, bw = Math.min(56, band * 0.64);
   let run = 0; const bars = steps.map(s => { if (s.kind === 'total') { const b = { ...s, y0: 0, y1: s.v }; run = s.v; return b; } const b = { ...s, y0: run, y1: run - s.v }; run -= s.v; return b; });
   const hi = nice(Math.max(...bars.map(b => Math.max(b.y0, b.y1)), 0)).max, lo = Math.min(0, ...bars.map(b => Math.min(b.y0, b.y1))), loN = lo < 0 ? -nice(-lo).max : 0;
-  const y = v => T + ch - ((v - loN) / (hi - loN || 1)) * ch, step = nice(hi - loN).step, C = SER();
+  const step = nice(hi).step, loS = lo < 0 ? -Math.ceil(-lo / step) * step : 0;
+  const y = v => T + ch - ((v - loS) / (hi - loS || 1)) * ch, C = SER();
   let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
-  for (let v = loN; v <= hi + 1e-9; v += step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(usdK(v))}</text>`;
+  for (let v = loS; v <= hi + 1e-9; v += step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(usdK(v))}</text>`;
   s += `</g>`;
   bars.forEach((b, i) => {
     const x = L + band * i + (band - bw) / 2, top = y(Math.max(b.y0, b.y1)), bot = y(Math.min(b.y0, b.y1));
@@ -341,7 +402,6 @@ function activeChips() {
   const out = [];
   if (S.platform !== 'all') out.push(['platform', '', S.platform === 'wf' ? 'Wayfair' : 'Amazon']);
   for (const [k, lbl] of FILTER_KEYS) for (const v of S.f[k]) out.push([k, v, `${lbl}: ${k === 'size' ? sizeLbl(v) : v}`]);
-  if (S.incTT) out.push(['tt', '', 'Incl. Tried & True']);
   return out.length ? `<div class="chips-active">${out.map(([k, v, l]) => `<span class="tag" data-unchip="${esc(k)}" data-v="${esc(v)}">${esc(l)} ✕</span>`).join('')}</div>` : '';
 }
 const pageHead = (title, sub) => `<div class="page-head"><div><h1>${title}</h1><p>${sub || rangeText() + (S.compare ? ' · compared with the previous ' + (diffDays(...range()) + 1) + ' days' : '')}</p></div>${activeChips()}</div>`;
@@ -355,16 +415,14 @@ function viewOverview() {
   const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
   const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
   // month-to-date vs plan (ignores the date filter, keeps the others)
-  const ym = M.today.slice(0, 7), mtd = period(ym + '-01', M.today).a, ki = D.kpi ? D.kpi.months.indexOf(ym) : -1;
+  const ym = M.today.slice(0, 7), mp = period(ym + '-01', M.today), mtd = mp.a, ki = D.kpi ? D.kpi.months.indexOf(ym) : -1;
   const goal = ki >= 0 ? D.kpi.rev[ki] : 0, dIn = daysIn(ym), dNow = +M.today.slice(8, 10), pace = goal * dNow / dIn, proj = mtd.rev / dNow * dIn;
-  const gUnits = ki >= 0 ? D.kpi.unit[ki] : 0, gProfit = ki >= 0 ? D.kpi.profit[ki] : 0;
+  const gUnits = ki >= 0 ? D.kpi.unit[ki] : 0, gProfit = ki >= 0 ? D.kpi.profit[ki] : 0, gMkt = ki >= 0 && D.kpi.mkt ? D.kpi.mkt[ki] / D.kpi.rev[ki] : null;
   const tgt = target('rev', f, t);
-  // monthly actual vs target
-  const months = D.kpi ? D.kpi.months : []; const allPs = basePieces();
+  const months = D.kpi ? D.kpi.months : []; const allPs = basePieces().filter(x => !x.tt);
   const actBy = groupBy(allPs, x => x.date.slice(0, 7));
   const shown = S.kpiAll ? months : months.filter(m => m <= M.today.slice(0, 7) || m === addDays(M.today, 31).slice(0, 7));
-  const days = daysOf(f, t), dayPs = byDay(cur.ps, f, t, ps => agg(ps));
-  const dayAds = days.map(d => (cur.ad.daily.get(d) || {}).spend || 0);
+  const gran = autoGran(f, t), bk = buckets(cur.ps, cur.ad, f, t, gran);
   const alerts = buildAlerts(cur);
   const byCol = groupBy(cur.ps, x => x.col), byType = groupBy(cur.ps, x => x.type);
   return `${pageHead('Overview')}
@@ -376,31 +434,31 @@ function viewOverview() {
       <div class="line">Day ${dNow} of ${dIn}: pace target ${usd(pace)} · <b style="color:${mtd.rev >= pace ? 'var(--good-ink)' : 'var(--crit-ink)'}">${mtd.rev >= pace ? 'ahead by' : 'behind by'} ${usd(Math.abs(mtd.rev - pace))}</b> · full-month projection ${usd(proj)}</div>
       <div class="hero-stats">
         <div><b>${n0(mtd.units)} / ${n0(gUnits)}</b><span>Units sold / target</span></div>
-        <div><b>${usd(mtd.net)}</b><span>Net revenue</span></div>
-        <div><b>${usd(mtd.gp - ads(ym + '-01', M.today).filtered)} / ${usd(gProfit)}</b><span>Profit / target</span></div>
-        <div><b>${n0(mtd.orders)}</b><span>Orders</span></div>
+        <div><b>${usd(mtd.net)}</b><span>NMV</span></div>
+        <div><b>${usd(mtd.profit)} / ${usd(gProfit)}</b><span>Profit / target</span></div>
+        <div><b>${pct(mtd.mktPct, 1)}${gMkt != null ? ` / ${pct(gMkt, 1)}` : ''}</b><span>% Mkt fee / plan</span></div>
       </div>
     </div>
   </section>
   <div class="grid g-kpi">
     ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}${tgt ? ` · ${pct(a.rev / tgt)} of target` : ''}`, 'Wayfair base cost × units (before promotion) — same basis as the KPI "Rev" line.')}
-    ${kpi('Net Revenue', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'What Wayfair actually pays: wholesale price after promotion funding.')}
-    ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()}`)}
-    ${kpi('Orders', n0(a.orders), `${delta(a.orders, b.orders)} ${vsPrev()}`)}
-    ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`, 'Net revenue − platform fee − DDA − COGS (FIFO by PO) − returns − CastleGate fees − ad spend.')}
+    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Net revenue: the wholesale price Wayfair actually pays after promotion funding.')}
+    ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()} · ${n0(a.orders)} orders`)}
+    ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`, 'NMV − platform fees (DDA 4% + CastleGate fulfillment) − COGS (FIFO by PO) − Tried & True cost − return & incident deductions − ad spend.')}
     ${kpi('Profit Margin', pct(a.margin, 1), `${delta(a.margin, b.margin, { pp: true })} ${vsPrev()}`, 'Profit ÷ Revenue')}
-    ${kpi('Ad Spend', usd(a.ads), `${delta(a.ads, b.ads, { invert: true })} ${vsPrev()}`)}
-    ${kpi('TACoS', pct(a.tacos, 1), `${delta(a.tacos, b.tacos, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ Revenue')}
+    ${kpi('Mkt Fee', usd(a.mkt), `${delta(a.mkt, b.mkt, { invert: true })} ${vsPrev()}`, 'Promotion + Ad spend')}
+    ${kpi('% Mkt Fee / Revenue', pct(a.mktPct, 1), `${delta(a.mktPct, b.mktPct, { pp: true, invert: true })} ${vsPrev()}`, 'Mkt Fee ÷ Revenue')}
+    ${kpi('TACoS', pct(a.tacos, 1), `${delta(a.tacos, b.tacos, { pp: true, invert: true })} ${vsPrev()}`, 'Ad spend ÷ Revenue')}
   </div>
+  ${card('Units, NMV and marketing cost', `Bars = units sold · line = NMV · dashed = % Mkt fee (promotion + ads) of revenue · by ${gran}`, combo(bk), { actions: granBtns(), cls: 'big-chart' })}
   <div class="grid g-21">
-    ${card('Revenue vs target by month', 'Actual revenue (base cost) vs the "Rev" plan in Cashflow 26+27', vbars(shown.map(m => { const i = months.indexOf(m), act = agg(actBy.get(m) || []).rev; return { label: mLabel(m), vs: [act, D.kpi.rev[i]], tip: tipRows(mLabel(m), [['Actual', usd(act), C[0]], ['Target', usd(D.kpi.rev[i]), C[0]], ['Achieved', pct(D.kpi.rev[i] ? act / D.kpi.rev[i] : null)]]) }; }), { fmt: usdK, series: [{ name: 'Actual', color: C[0] }, { name: 'Target', color: C[0], ghost: true }], showVals: false, w: CW('wide'), h: 320 }),
+    ${card('Revenue vs target by month', 'Actual revenue (base cost) vs the "Rev" plan in Cashflow 26+27', vbars(shown.map(m => { const i = months.indexOf(m), act = agg(actBy.get(m) || []).rev; return { label: mLabel(m), vs: [act, D.kpi.rev[i]], tip: tipRows(mLabel(m), [['Actual', usd(act), C[0]], ['Target', usd(D.kpi.rev[i]), C[0]], ['Achieved', pct(D.kpi.rev[i] ? act / D.kpi.rev[i] : null)]]) }; }), { fmt: usdK, series: [{ name: 'Actual', color: C[0] }, { name: 'Target', color: C[0], ghost: true }], showVals: false, w: CW('wide'), h: 340 }),
       { actions: `<button class="view-toggle" data-act="kpiAll" aria-pressed="${S.kpiAll}">${S.kpiAll ? 'To date' : 'Full plan'}</button>` })}
     ${card('Alerts & actions', '', `<div class="alerts">${alerts}</div>`)}
   </div>
-  ${card('Daily revenue, profit and ad spend', 'Profit per day before ad spend is allocated; ad spend shown separately', lines(days.map(dShort), [{ name: 'Revenue', vals: dayPs.map(x => x.rev), color: C[0] }, { name: 'Profit before ads', vals: dayPs.map(x => x.gp), color: C[2] }, { name: 'Ad spend', vals: dayAds, color: C[1], dash: true }], { fmt: usdK, h: 300 }))}
   <div class="grid g-2">
     ${card('Revenue by collection', '', donut([...byCol].map(([k, ps]) => ({ label: k, v: sum(ps, x => x.rev), color: colColor(k), extra: [['Units', n0(sum(ps, x => x.qty))]] })).sort((x, y) => y.v - x.v), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
-    ${card('Revenue by product type', '', donut([...byType].map(([k, ps], i) => ({ label: k, v: sum(ps, x => x.rev), extra: [['Units', n0(sum(ps, x => x.qty))]] })).sort((x, y) => y.v - x.v), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
+    ${card('Revenue by product type', '', donut([...byType].map(([k, ps]) => ({ label: k, v: sum(ps, x => x.rev), extra: [['Units', n0(sum(ps, x => x.qty))]] })).sort((x, y) => y.v - x.v), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
   </div>`;
 }
 function freeInfo(po) {
@@ -416,9 +474,10 @@ function buildAlerts(cur) {
     const value = sum(Object.values(M.layers).flat().filter(l => l.po === po.id), l => l.left * l.cogs);
     out.push(`<div class="alert ${fi.left <= 14 ? 'crit' : fi.left <= 45 ? 'warn' : 'info'}"><span class="ic">⏳</span><div><b>${esc(po.id)}: ${fi.left} free-storage days left (until ${dLong(fi.end)})</b><span>${n0(fi.remain)} of ${n0(fi.recvU)} units still in stock (${usd(value)} at landed cost). At the last-30-day pace about ${n0(proj)} units will still be there when fees start.</span></div></div>`); }
   const tt = M.lines.filter(l => l.tt && l.ok && (S.platform !== 'amz'));
-  if (tt.length) out.push(`<div class="alert info"><span class="ic">★</span><div><b>${new Set(tt.map(l => l.po)).size} Tried &amp; True orders (${n0(sum(tt, l => l.qty))} units)</b><span>${S.incTT ? 'Included in sales figures (filter on).' : 'Excluded from sales and profit by default; their stock cost is shown in Sales → Tried & True.'}</span></div></div>`);
+  if (tt.length) out.push(`<div class="alert info"><span class="ic">★</span><div><b>${new Set(tt.map(l => l.po)).size} Tried &amp; True orders (${n0(sum(tt, l => l.qty))} units)</b><span>Wayfair pays no wholesale for these; only the 4% DDA comes back. Their landed cost + fulfillment is charged to profit as "Tried &amp; True".</span></div></div>`);
   const un = M.pieces.filter(x => x.ok && x.layer === 'Unassigned');
   if (un.length) out.push(`<div class="alert warn"><span class="ic">!</span><div><b>${n0(sum(un, x => x.qty))} units sold beyond the PO quantities on file</b><span>${esc([...new Set(un.map(x => x.part))].join(', '))} — costed at the latest known landed cost. Send the next PO cost sheet to cost these exactly.</span></div></div>`);
+  const st = D.incidentStats; if (st) out.push(`<div class="alert warn"><span class="ic">!</span><div><b>Incident rate ${pct(st.incidentRate)} · replacement parts shipped ${pct(st.partsShipped)}</b><span>Damage incidents inside 30 days are covered by the 4% DDA only when the replacement part is sent; unanswered part requests turn into deductions (e.g. KFFX $471). Review Replacement Part Settings in Partner Home.</span></div></div>`);
   const d9 = M.P.D9YA; if (d9 && d9.baseListed && d9.baseListed !== d9.base) out.push(`<div class="alert crit"><span class="ic">$</span><div><b>D9YA base cost on Wayfair is $${d9.baseListed} (siblings $${d9.base})</b><span>Orders are paid on a $${d9.base} base, but the listed base cost inflates its Wayfair retail price. Worth correcting in Partner Home.</span></div></div>`);
   const low = (D.wf.inv || []).filter(r => (r[2] || 0) > 0 && (r[2] || 0) <= 1);
   if (low.length) out.push(`<div class="alert warn"><span class="ic">↓</span><div><b>${low.length} SKUs down to 1 unit</b><span>${esc(low.map(r => r[0]).join(', '))}</span></div></div>`);
@@ -441,21 +500,21 @@ function viewSales() {
     ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()}`)}
     ${kpi('Orders', n0(a.orders), `${delta(a.orders, b.orders)} ${vsPrev()}`)}
     ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`, 'Base cost × units')}
-    ${kpi('Net Revenue', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Wholesale price actually paid')}
+    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Net revenue: wholesale price actually paid')}
     ${kpi('Promotion', usd(a.promo), `${pct(a.rev ? a.promo / a.rev : null, 1)} of revenue · ${delta(a.promo, b.promo, { invert: true })}`, 'Revenue − Net Revenue (Wayfair promotion funding)')}
     ${kpi('GMV', usd(a.gmv), `${delta(a.gmv, b.gmv)} ${vsPrev()}`, 'Revenue × 2 (estimated consumer spend)')}
     ${kpi('Avg. Order Value', usd(a.aov), `${delta(a.aov, b.aov)} ${vsPrev()}`, 'Revenue ÷ orders')}
-    ${kpi('Cancelled / Rejected', n0(sum(bad, x => x.qty)) + '<small>units</small>', `${new Set(bad.map(x => x.po)).size} orders`)}
+    ${kpi('Returns', n0(cur.a.returnUnits) + '<small>units</small>', `${usd(cur.a.returns)} deducted · ${n0(sum(bad, x => x.qty))} cancelled/rejected`)}
   </div>
-  ${card('Daily revenue and units', '', `<div class="grid g-2">${vbars(days.map((d, i) => ({ label: dShort(d), v: dayA[i].rev, tip: tipRows(dLong(d), [['Revenue', usd(dayA[i].rev)], ['Net revenue', usd(dayA[i].net)], ['Units', n0(dayA[i].units)], ['Orders', n0(dayA[i].orders)]]) })), { fmt: usdK, showVals: days.length <= 14, w: Math.round(CW('half') - 10) })}${vbars(days.map((d, i) => ({ label: dShort(d), v: dayA[i].units, tip: tipRows(dLong(d), [['Units', n0(dayA[i].units)], ['Orders', n0(dayA[i].orders)]]) })), { fmt: n0, colors: [C[2]], showVals: days.length <= 31, w: Math.round(CW('half') - 10) })}</div>`)}
+  ${card('Units, NMV and marketing cost', `Bars = units sold · line = NMV · dashed = % Mkt fee of revenue · by ${autoGran(f, t)}`, combo(buckets(cur.ps, cur.ad, f, t, autoGran(f, t))), { actions: granBtns(), cls: 'big-chart' })}
   <div class="grid g-2">
     ${card('By collection', 'Revenue · units on the right', hbars(grp('col').sort((x, y) => y.rev - x.rev).map(r => ({ label: r.k, v: r.rev, sub: n0(r.units) + ' u', color: colColor(r.k), extra: [['Units', n0(r.units)], ['Net revenue', usd(r.net)], ['Share', pct(a.rev ? r.rev / a.rev : 0, 1)]] })), { fmt: usd }))}
     ${card('By product type', 'Single · Double · Floating · Rolling Cart', donut(grp('type').sort((x, y) => y.rev - x.rev).map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: n0(a.units), sub: 'units' }))}
-    ${card('By size', 'Units sold per vanity width', vbars(bySize.map(r => ({ label: r.k ? sizeLbl(r.k) : 'Cart', v: r.units, tip: tipRows(r.k ? sizeLbl(r.k) : 'Rolling cart', [['Units', n0(r.units)], ['Revenue', usd(r.rev)], ['Type', r.k ? (r.k >= 60 ? 'Double' : r.k <= 30 ? 'Floating · single' : 'Single') : 'Rolling Cart']]) })), { fmt: n0, colors: [C[0]] }))}
+    ${card('By size', 'Units sold per vanity width', vbars(bySize.map(r => ({ label: sizeLbl(r.k), v: r.units, tip: tipRows(sizeLbl(r.k), [['Units', n0(r.units)], ['Revenue', usd(r.rev)], ['Type', r.k ? (r.k >= 60 ? 'Double' : r.k <= 30 ? 'Floating · single' : 'Single') : 'Rolling Cart']]) })), { fmt: n0, colors: [C[0]] }))}
     ${card('By color', '', donut(grp('color', x => x.color || 'No color (cart)').sort((x, y) => y.units - x.units).map(r => ({ label: r.k, v: r.units, extra: [['Revenue', usd(r.rev)]] })), { center: n0(a.units), sub: 'units' }))}
     ${card('By category', 'Bathroom Vanity · Rolling Cart', donut(grp('cat').map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
-    ${card('Tried &amp; True (review samples)', `${S.incTT ? 'Included' : 'Excluded'} in sales figures · toggle in Filters`, ttL.length ? `<div class="grid g-kpi" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
-        <div><div class="sub">Orders</div><b style="font-size:22px">${new Set(ttL.map(l => l.po)).size}</b></div><div><div class="sub">Units</div><b style="font-size:22px">${n0(sum(ttL, l => l.qty))}</b></div><div><div class="sub">Landed cost</div><b style="font-size:22px">${usd(sum(ttPs, x => x.cogs))}</b></div></div>
+    ${card('Tried &amp; True (review samples)', 'Not counted as sales · Wayfair pays only the 4% DDA back · cost charged to profit', ttL.length ? `<div class="grid g-kpi" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+        <div><div class="sub">Orders</div><b style="font-size:22px">${new Set(ttL.map(l => l.po)).size}</b></div><div><div class="sub">Units</div><b style="font-size:22px">${n0(sum(ttL, l => l.qty))}</b></div><div><div class="sub">Net cost</div><b style="font-size:22px">${usd(sum(ttPs, x => x.cogs + x.cg - x.net))}</b></div></div>
         ${table('tt', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'qty', l: 'Units', num: true }, { k: 'state', l: 'State' }], ttL, { def: { k: 'date', d: 'desc' } })}` : '<div class="empty">No Tried &amp; True orders in this period</div>')}
   </div>
   ${card('SKU performance', 'Click a column to sort', table('skus', [
@@ -471,46 +530,50 @@ function viewSales() {
 function viewProfit() {
   const [f, t] = range(), [pf, pt] = prevRange(), C = SER(), A = M.A;
   const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
-  const steps = [{ label: 'Revenue', v: a.rev, kind: 'total' }, { label: 'Promotion', v: a.promo }, { label: 'Platform fee', v: a.fee }, { label: 'DDA', v: a.dda }, { label: 'COGS (landed)', v: a.cogs }, { label: 'Returns', v: a.ret }, { label: 'CastleGate fees', v: a.cg }, { label: 'Ad spend', v: a.ads }, { label: 'Profit', v: a.profit, kind: 'total' }].map(s => ({ ...s, share: a.rev ? s.v / a.rev : null }));
-  const byPart = [...groupBy(cur.ps, x => x.part)].map(([part, ps]) => { const g = agg(ps), adsP = cur.ad.byPart[part] || 0, p = M.P[part] || {}; const profit = g.gp - adsP;
-    return { part, col: p.col, layers: [...new Set(ps.map(x => x.layer))].join(', '), units: g.units, rev: g.rev, promo: g.promo, net: g.net, fee: g.fee, dda: g.dda, cogs: g.cogs, unitCogs: g.units ? g.cogs / g.units : 0, ret: g.ret, cg: g.cg, ads: adsP, profit, margin: g.rev ? profit / g.rev : null, perUnit: g.units ? profit / g.units : 0 }; });
-  // ad spend on SKUs with no sales in the period (kept so totals reconcile)
+  const steps = [{ label: 'Revenue', v: a.rev, kind: 'total' }, { label: 'Promotion', v: a.promo }, { label: 'DDA 4%', v: a.dda }, { label: 'Fulfillment', v: a.cg }, { label: 'COGS (landed)', v: a.cogs }, { label: 'Tried & True', v: a.ttCost }, { label: 'Returns', v: a.returns }, { label: 'Incidents', v: a.incidents }, { label: 'Ad spend', v: a.ads }, { label: 'Profit', v: a.profit, kind: 'total' }]
+    .filter(s => s.kind || Math.abs(s.v) > 0.005).map(s => ({ ...s, share: a.rev ? s.v / a.rev : null }));
+  const dedBy = groupBy(cur.dd.list, d => d.part);
+  const parts = new Set([...cur.all.map(x => x.part), ...cur.dd.list.map(d => d.part)]);
+  const byPart = [...parts].map(part => { const ps = cur.all.filter(x => x.part === part), g = agg(ps), adsP = cur.ad.byPart[part] || 0, p = M.P[part] || {}, dl = dedBy.get(part) || [];
+    const ret = sum(dl.filter(d => d.type === 'Return'), d => d.amount), inc = sum(dl.filter(d => d.type !== 'Return'), d => d.amount), profit = g.gp - ret - inc - adsP;
+    return { part, col: p.col, layers: [...new Set(ps.map(x => x.layer))].join(', '), units: g.units, rev: g.rev, promo: g.promo, net: g.net, dda: g.dda, cg: g.cg, cgEst: ps.some(x => x.cgEst), cogs: g.cogs, unitCogs: g.units ? g.cogs / g.units : 0, tt: g.ttCost, ret, inc, ads: adsP, mkt: g.promo + adsP, profit, margin: g.rev ? profit / g.rev : null, perUnit: g.units ? profit / g.units : 0 }; });
   const soldParts = new Set(byPart.map(r => r.part)); const idle = sum(Object.entries(cur.ad.byPart).filter(([p]) => !soldParts.has(p) && passProd(p)), ([, v]) => v) + (prodFilterOn() || S.f.po.size ? 0 : cur.ad.unalloc);
-  if (idle > 0.5) byPart.push({ part: 'Ads on SKUs with no sales', col: '', layers: '', units: 0, rev: 0, promo: 0, net: 0, fee: 0, dda: 0, cogs: 0, ret: 0, cg: 0, ads: idle, profit: -idle, margin: null, perUnit: 0, idle: true });
+  if (idle > 0.5) byPart.push({ part: 'Ads on SKUs with no sales', col: '', layers: '', units: 0, rev: 0, promo: 0, net: 0, dda: 0, cg: 0, cogs: 0, tt: 0, ret: 0, inc: 0, ads: idle, mkt: idle, profit: -idle, margin: null, perUnit: 0, idle: true });
   const byCol = [...groupBy(byPart.filter(r => r.col), r => r.col)].map(([k, rs]) => ({ k, rev: sum(rs, r => r.rev), profit: sum(rs, r => r.profit) }));
-  const byType = [...groupBy(cur.ps, x => x.type)].map(([k, ps]) => { const g = agg(ps), ad = sum([...new Set(ps.map(x => x.part))], p => cur.ad.byPart[p] || 0); return { k, rev: g.rev, profit: g.gp - ad }; });
-  const fifo = []; for (const [part, L] of Object.entries(M.layers)) for (const l of L) if ((!S.f.po.size || S.f.po.has(l.po)) && passProd(part)) fifo.push({ part, po: l.po, recv: l.recv, qty: l.qty, sold: l.qty - l.left, left: l.left, fob: l.fob, cogs: l.cogs, value: l.left * l.cogs, st: l.qty ? (l.qty - l.left) / l.qty : 0 });
-  const money = v => usd(v), m2 = v => usd(v, 2);
+  const byType = [...groupBy(byPart.filter(r => r.col), r => (M.P[r.part] || {}).type)].map(([k, rs]) => ({ k, rev: sum(rs, r => r.rev), profit: sum(rs, r => r.profit) }));
+  const fifo = []; for (const [part, L] of Object.entries(M.layers)) for (const l of L) if ((!S.f.po.size || S.f.po.has(l.po)) && passProd(part)) fifo.push({ part, po: l.po, recv: l.recv, qty: l.qty, sold: l.qty - l.left, left: l.left, fob: l.fob, sheet: l.sheet, unload: l.unload, cogs: l.cogs, value: l.left * l.cogs, st: l.qty ? (l.qty - l.left) / l.qty : 0 });
+  const money = v => usd(v), m2 = v => usd(v, 2), CGa = M.CG.actual || {};
   return `${pageHead('Profit')}
   <div class="grid g-kpi">
     ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`)}
-    ${kpi('Net Revenue', usd(a.net), `after ${usd(a.promo)} promotion`)}
-    ${kpi('COGS (landed, FIFO)', usd(a.cogs), `${pct(a.rev ? a.cogs / a.rev : null, 1)} of revenue · FOB ${usd(a.fob)}`, 'Landed cost per unit from the PO shipment cost sheet, consumed first-in-first-out by PO.')}
-    ${kpi('Platform fee + DDA', usd(a.fee + a.dda), `${pct(A.platformFee)} + ${pct(A.dda, 1)} of net revenue`, 'Wayfair Co-op (platform fee) 10% and Damage/Defect Allowance 2.5% of net revenue, per the PO cost sheet.')}
-    ${kpi('Ad Spend', usd(a.ads), `TACoS ${pct(a.tacos, 1)} · ${delta(a.ads, b.ads, { invert: true })}`)}
-    ${kpi('Total Costs', usd(a.costs), `${pct(a.rev ? a.costs / a.rev : null, 1)} of revenue`, 'Everything between Revenue and Profit, incl. promotion.')}
+    ${kpi('NMV', usd(a.net), `after ${usd(a.promo)} promotion`, 'Net revenue = wholesale price paid by Wayfair')}
+    ${kpi('Platform fees', usd(a.platform), `DDA 4% ${usd(a.dda)} · fulfillment ${usd(a.cg)}`, 'Verified in Partner Home: DDA 4% of the wholesale price on every order (Returns Management) + CastleGate Fulfillment fee per unit shipped (Accounts Payable invoice). Storage is free for the first 90 days.')}
+    ${kpi('COGS (landed, FIFO)', usd(a.cogs), `${pct(a.rev ? a.cogs / a.rev : null, 1)} of revenue · FOB ${usd(a.fob)}`, 'PO cost sheet landed cost + CastleGate container unload per unit, consumed first-in-first-out by PO.')}
+    ${kpi('Mkt Fee', usd(a.mkt), `${pct(a.mktPct, 1)} of revenue · promo ${usd(a.promo)} + ads ${usd(a.ads)}`, 'Promotion + Ad spend')}
+    ${kpi('Returns & incidents', usd(a.returns + a.incidents), `${n0(a.returnUnits)} return${a.returnUnits === 1 ? '' : 's'} · incidents ${usd(a.incidents)}`, 'Actual Wayfair deductions. Returns are Wayfair-Managed: deduction = wholesale × (1 − 4% DDA) × 75% WMR rate.')}
     ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`)}
     ${kpi('Profit Margin', pct(a.margin, 1), `${delta(a.margin, b.margin, { pp: true })} ${vsPrev()}`, 'Profit ÷ Revenue')}
   </div>
-  ${card('Revenue to profit', 'Where each dollar of revenue goes in this period (hover for % of revenue)', waterfall(steps))}
-  ${card('Profit by SKU', 'COGS uses the PO layer(s) each unit came from · ad spend by Wayfair listing (SKU report), split across child SKUs by net revenue', table('psku', [
+  ${card('Revenue to profit', 'Where each dollar of revenue goes in this period — hover for % of revenue', waterfall(steps, { h: 380 }), { cls: 'big-chart' })}
+  ${card('Profit by SKU', 'COGS from the PO layer each unit came from · fulfillment from the CastleGate invoice (* = rate of the same carton class, not invoiced yet) · ads from the Wayfair SKU report', table('psku', [
     { k: 'part', l: 'SKU', f: (v, r) => r.idle ? `<i class="sub">${esc(v)}</i>` : skuCell(v) }, { k: 'units', l: 'Units', num: true, f: v => n0(v) }, { k: 'rev', l: 'Revenue', num: true, f: money },
     { k: 'profit', l: 'Profit', num: true, neg: true, f: v => `<b>${usd(v)}</b>` }, { k: 'margin', l: 'Margin', num: true, neg: true, f: v => pct(v, 1) }, { k: 'perUnit', l: 'Profit / unit', num: true, neg: true, f: m2 },
-    { k: 'promo', l: 'Promotion', num: true, f: money }, { k: 'net', l: 'Net Rev.', num: true, f: money }, { k: 'fee', l: 'Platform fee', num: true, f: money }, { k: 'dda', l: 'DDA', num: true, f: money },
-    { k: 'cogs', l: 'COGS', num: true, f: money }, { k: 'unitCogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'ret', l: 'Returns', num: true, f: money }, { k: 'cg', l: 'CastleGate', num: true, f: money }, { k: 'ads', l: 'Ads', num: true, f: money }, { k: 'layers', l: 'PO layer' }], byPart,
-    { def: { k: 'profit', d: 'desc' }, foot: { part: 'Total', layers: '', units: a.units, rev: a.rev, promo: a.promo, net: a.net, fee: a.fee, dda: a.dda, cogs: a.cogs, unitCogs: a.units ? a.cogs / a.units : 0, ret: a.ret, cg: a.cg, ads: a.ads, profit: a.profit, margin: a.margin, perUnit: a.units ? a.profit / a.units : 0 } }))}
+    { k: 'promo', l: 'Promotion', num: true, f: money }, { k: 'net', l: 'NMV', num: true, f: money }, { k: 'dda', l: 'DDA 4%', num: true, f: money }, { k: 'cg', l: 'Fulfillment', num: true, f: (v, r) => usd(v, 2) + (r.cgEst ? '*' : '') },
+    { k: 'cogs', l: 'COGS', num: true, f: money }, { k: 'unitCogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'tt', l: 'T&T cost', num: true, f: money }, { k: 'ret', l: 'Returns', num: true, f: money }, { k: 'inc', l: 'Incidents', num: true, f: money }, { k: 'ads', l: 'Ads', num: true, f: money }, { k: 'mkt', l: 'Mkt fee', num: true, f: money }, { k: 'layers', l: 'PO layer' }], byPart,
+    { def: { k: 'profit', d: 'desc' }, foot: { part: 'Total', layers: '', units: a.units, rev: a.rev, promo: a.promo, net: a.net, dda: a.dda, cg: a.cg, cogs: a.cogs, unitCogs: a.units ? a.cogs / a.units : 0, tt: a.ttCost, ret: a.returns, inc: a.incidents, ads: a.ads, mkt: a.mkt, profit: a.profit, margin: a.margin, perUnit: a.units ? a.profit / a.units : 0 } }))}
   <div class="grid g-2">
-    ${card('Profit margin by collection', 'Profit ÷ revenue · red = loss after ads', hbars(byCol.filter(r => r.rev).sort((x, y) => y.profit / y.rev - x.profit / x.rev).map(r => ({ label: r.k, v: r.profit / r.rev, sub: usd(r.profit), color: colColor(r.k), extra: [['Revenue', usd(r.rev)], ['Profit', usd(r.profit)]] })), { fmt: v => pct(v, 1) }))}
+    ${card('Profit margin by collection', 'Profit ÷ revenue · red = loss', hbars(byCol.filter(r => r.rev).sort((x, y) => y.profit / y.rev - x.profit / x.rev).map(r => ({ label: r.k, v: r.profit / r.rev, sub: usd(r.profit), color: colColor(r.k), extra: [['Revenue', usd(r.rev)], ['Profit', usd(r.profit)]] })), { fmt: v => pct(v, 1) }))}
     ${card('Profit by product type', '', hbars(byType.sort((x, y) => y.profit - x.profit).map(r => ({ label: r.k, v: r.profit, sub: pct(r.rev ? r.profit / r.rev : null), extra: [['Revenue', usd(r.rev)], ['Margin', pct(r.rev ? r.profit / r.rev : null, 1)]] })), { fmt: usd, color: C[2] }))}
   </div>
-  ${card('FIFO cost layers', 'Each PO shipment is a cost layer; units sell from the oldest layer first, then the next PO. All-time, not limited to the date range.', table('fifo', [
+  ${cur.dd.list.length ? card('Wayfair deductions', 'Returns and incidents charged back in this period', table('ded', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'type', l: 'Type', f: v => `<span class="tag ${v === 'Return' ? '' : 'bad'}">${esc(v)}</span>` }, { k: 'reason', l: 'Reason' }, { k: 'amount', l: 'Amount', num: true, f: v => usd(v, 2) }, { k: 'note', l: 'Note' }], cur.dd.list, { def: { k: 'date', d: 'desc' } })) : ''}
+  ${card('FIFO cost layers', 'Each PO shipment is a cost layer; units sell from the oldest layer first. All-time.', table('fifo', [
     { k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'po', l: 'PO' }, { k: 'recv', l: 'Received', f: v => dLong(v) }, { k: 'qty', l: 'Qty in', num: true }, { k: 'sold', l: 'Sold', num: true }, { k: 'left', l: 'Remaining', num: true }, { k: 'st', l: 'Sell-through', num: true, f: v => `${pct(v)}<span class="mini-bar" style="width:${Math.round(v * 50)}px"></span>` },
-    { k: 'fob', l: 'FOB / unit', num: true, f: m2 }, { k: 'cogs', l: 'Landed / unit', num: true, f: m2 }, { k: 'value', l: 'Stock value', num: true, f: money }], fifo, { def: { k: 'value', d: 'desc' } }))}
-  ${card('Cost assumptions', 'Change any rate here by sending the new figure — the model recalculates every metric', `<div class="assump">
-      <div><span>Revenue</span><b>Base cost × units</b></div><div><span>Net revenue</span><b>Wholesale price paid</b></div><div><span>Promotion</span><b>Revenue − Net revenue</b></div><div><span>GMV</span><b>Revenue × 2</b></div>
-      <div><span>Platform fee (Wayfair Co-op)</span><b>${pct(A.platformFee, 1)} of net rev.</b></div><div><span>DDA (damage allowance)</span><b>${pct(A.dda, 1)} of net rev.</b></div><div><span>Returns provision</span><b>${pct(A.returns, 1)} of revenue</b></div><div><span>CastleGate fees</span><b>${pct(A.castlegate, 1)} of revenue</b></div>
-      <div><span>COGS</span><b>Landed cost by PO, FIFO</b></div><div><span>Ad spend by SKU</span><b>Listing spend × net-revenue share</b></div><div><span>Profit margin</span><b>Profit ÷ Revenue</b></div><div><span>TACoS</span><b>Ad spend ÷ Revenue</b></div></div>
-      <p class="note">Returns and CastleGate fees use the Cashflow 26+27 plan rates until actual return and fee data are available from Wayfair. Each future PO (2nd, 3rd shipment…) is its own cost layer with its own factory FOB and freight, so a container that cost more only affects the units that came in on it.</p>`)}`;
+    { k: 'fob', l: 'FOB', num: true, f: m2 }, { k: 'sheet', l: 'Landed (sheet)', num: true, f: m2 }, { k: 'unload', l: 'Unload', num: true, f: m2 }, { k: 'cogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'value', l: 'Stock value', num: true, f: money }], fifo, { def: { k: 'value', d: 'desc' } }))}
+  ${card('How each cost is calculated', 'Every rate below was checked in Wayfair Partner Home on Nov 13, 2026', `<div class="assump">
+      <div><span>Revenue</span><b>Base cost × units</b></div><div><span>NMV (net revenue)</span><b>Wholesale price paid</b></div><div><span>Promotion</span><b>Revenue − NMV</b></div><div><span>GMV</span><b>Revenue × 2</b></div>
+      <div><span>DDA (Damage &amp; Defect Allowance)</span><b>${pct(A.dda, 1)} of wholesale paid</b></div><div><span>CastleGate fulfillment</span><b>Per unit by carton class</b></div><div><span>CastleGate storage</span><b>$0 for first 90 days</b></div><div><span>Container unload</span><b>Per unit, in COGS</b></div>
+      <div><span>Returns (Wayfair-Managed)</span><b>Paid × (1 − DDA) × ${pct(A.wmr)}</b></div><div><span>Incidents</span><b>Actual deductions</b></div><div><span>Tried &amp; True</span><b>COGS + fulfillment − DDA back</b></div><div><span>Mkt fee</span><b>Promotion + ads</b></div></div>
+      <p class="note"><b>Fulfillment per unit (Oct invoice 1695394):</b> ${Object.entries(CGa).map(([k, v]) => `${k} $${v.toFixed(2)}`).join(' · ')}. Storage after day 90 is charged daily from the CastleGate storage rate card — it starts on ${dLong(addDays(M.pos[0] && M.pos[0].recv || M.today, 90))} for the 1st Shipment. No co-op or other platform percentage appears on the CastleGate invoice or in Returns Management.</p>`)}`;
 }
 
 function viewCustomers() {
@@ -638,7 +701,7 @@ function renderSidebar() {
   const presets = [['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mtd', 'MTD'], ['qtd', 'QTD'], ['ytd', 'YTD'], ['all', 'All']];
   const ms = (k, lbl) => { const sel = S.f[k], opts = options(k); const txt = sel.size ? (sel.size === 1 ? (k === 'size' ? sizeLbl([...sel][0]) : [...sel][0]) : sel.size + ' selected') : 'All';
     return `<details class="ms" data-ms="${k}"${S.open[k] ? ' open' : ''}><summary><span>${lbl}</span><em class="${sel.size ? '' : 'all'}">${esc(txt)}</em></summary><div class="ms-list">${sel.size ? `<button class="ms-clear" data-clear="${k}">Clear</button>` : ''}${opts.map(o => `<label><input type="checkbox" data-f="${k}" value="${esc(o.v)}"${sel.has(o.v) ? ' checked' : ''}><span>${esc(o.label)}</span><small>${o.n ? n0(o.n) : ''}</small></label>`).join('')}</div></details>`; };
-  const nOn = FILTER_KEYS.reduce((s, [k]) => s + S.f[k].size, 0) + (S.platform !== 'all') + S.incTT;
+  const nOn = FILTER_KEYS.reduce((s, [k]) => s + S.f[k].size, 0) + (S.platform !== 'all');
   $('#filterCount').textContent = nOn || '';
   $('#sidebar').innerHTML = `
     <div class="sb-head"><h2>Filters</h2><button class="link-btn" data-act="reset">Reset all</button></div>
@@ -651,7 +714,7 @@ function renderSidebar() {
     <div class="sb-sec"><span class="sb-lbl">Platform</span><div class="seg">${[['all', 'All'], ['wf', 'Wayfair'], ['amz', 'Amazon']].map(([k, l]) => `<button data-plat="${k}" aria-pressed="${S.platform === k}">${l}</button>`).join('')}</div></div>
     <div class="sb-sec"><span class="sb-lbl">Product</span>${ms('col', 'Collection')}${ms('cat', 'Category')}${ms('type', 'Product type')}${ms('size', 'Size')}${ms('color', 'Color')}${ms('sku', 'SKU')}</div>
     <div class="sb-sec"><span class="sb-lbl">Shipment</span>${ms('po', 'PO')}</div>
-    <div class="sb-sec"><label class="switch">Include Tried &amp; True orders<input type="checkbox" id="incTT"${S.incTT ? ' checked' : ''}></label></div>`;
+`;
 }
 
 // ---------------- render & wiring ----------------
@@ -682,6 +745,7 @@ sb.addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.data
 $('#view').addEventListener('click', e => {
   const th = e.target.closest('th[data-sort]');
   if (th) { const id = th.closest('table').dataset.table, k = th.dataset.sort, cur = S.sort[id] || {}; S.sort[id] = { k, d: cur.k === k && cur.d === 'desc' ? 'asc' : 'desc' }; rerender(); return; }
+  const g = e.target.closest('[data-gran]'); if (g) { S.gran = g.dataset.gran; rerender(); return; }
   const b = e.target.closest('[data-act]'); if (b) { if (b.dataset.act === 'kpiAll') S.kpiAll = !S.kpiAll; if (b.dataset.act === 'hideZero') S.hideZero = !S.hideZero; rerender(); return; }
   const c = e.target.closest('[data-unchip]'); if (c) { const k = c.dataset.unchip; if (k === 'platform') S.platform = 'all'; else if (k === 'tt') S.incTT = false; else S.f[k].delete(c.dataset.v); rerender(); }
 });
