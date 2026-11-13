@@ -1,0 +1,42 @@
+name: Daily API sync
+on:
+  schedule:
+    - cron: '23 7 * * *'   # 14:23 Asia/Saigon
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Only test API logins (no data written)'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: { group: data-sync, cancel-in-progress: false }
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Fetch from Amazon / Wayfair APIs
+        env:
+          LG_DK: ${{ secrets.LG_DK }}
+          AMZ_SP_CLIENT_ID: ${{ secrets.AMZ_SP_CLIENT_ID }}
+          AMZ_SP_CLIENT_SECRET: ${{ secrets.AMZ_SP_CLIENT_SECRET }}
+          AMZ_SP_REFRESH_TOKEN: ${{ secrets.AMZ_SP_REFRESH_TOKEN }}
+          AMZ_ADS_CLIENT_ID: ${{ secrets.AMZ_ADS_CLIENT_ID }}
+          AMZ_ADS_CLIENT_SECRET: ${{ secrets.AMZ_ADS_CLIENT_SECRET }}
+          AMZ_ADS_REFRESH_TOKEN: ${{ secrets.AMZ_ADS_REFRESH_TOKEN }}
+          WF_CLIENT_ID: ${{ secrets.WF_CLIENT_ID }}
+          WF_CLIENT_SECRET: ${{ secrets.WF_CLIENT_SECRET }}
+        run: node scripts/api-sync.mjs ${{ inputs.probe && '--probe' || '' }}
+      - name: Commit data
+        if: ${{ !inputs.probe }}
+        run: |
+          if git diff --quiet data/; then echo "no changes"; exit 0; fi
+          git config user.name "lignarc-sync"
+          git config user.email "lignarc-sync@users.noreply.github.com"
+          git add data/lignarc.enc.json
+          git commit -m "data: API sync $(TZ=Asia/Ho_Chi_Minh date '+%Y-%m-%d %H:%M') GMT+7"
+          git pull --rebase -q && git push
