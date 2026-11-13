@@ -72,8 +72,8 @@ export default async function wayfair({ gql, http, tok }) {
           }
           const pick = (...k) => k.map(x => ms[x]).find(Boolean) || null;
           res.push({ id: recvId || o.orderId, orderId: o.orderId, po: o.supplierOrderNumber, status: o.orderStatus, created: day(o.createdDate), ready: day(o.estimatedCargoReadyDate),
-            dest, container, loadAtd: pick('ATD_ORIGIN_PORT', 'DEPARTED_FROM_PORT_OF_LOADING'), portAta: pick('ARRIVED_AT_PORT_OF_DISCHARGE', 'ATA_DESTINATION_PORT'),
-            whAta: pick('DESTINATION_WAREHOUSE_ATA'), eta: pick('DESTINATION_WAREHOUSE_ETA'), recvStart: pick('RECEIVING_STARTED', 'RECEIVING_START'), recvEnd: pick('RECEIVING_ENDED', 'RECEIVING_END'),
+            dest, container, loadAtd: pick('ATD_ORIGIN_PORT', 'DEPARTED_FROM_PORT_OF_LOADING', 'ATD'), portAta: pick('ARRIVED_AT_PORT_OF_DISCHARGE', 'ATA_DESTINATION_PORT', 'ATA'), gatedOut: pick('GATED_OUT_AT_DESTINATION_PORT'),
+            whAta: pick('DESTINATION_WAREHOUSE_ATA'), eta: pick('DESTINATION_WAREHOUSE_ETA', 'ETA'), recvStart: pick('RECEIVING_STARTED', 'RECEIVING_START', 'DESTINATION_WAREHOUSE_ATA'), recvEnd: pick('RECEIVING_ENDED', 'RECEIVING_END'),
             lastFreeDay: pick('LAST_FREE_DAY'), milestones: ms, items: [] });
         }
         if (L.length < 25) break; await sleep(300);
@@ -125,7 +125,7 @@ export default async function wayfair({ gql, http, tok }) {
       if (!camps.has(cid)) camps.set(cid, [cid, c.name >= 0 ? r[c.name] : cid, 1, null, null, null, null, null]);
       daily.push([cid, dt, num(r[c.impr]), num(r[c.clicks]), num(r[c.spend]), c.units >= 0 ? num(r[c.units]) : 0, c.sales >= 0 ? num(r[c.sales]) : 0, c.orders >= 0 ? num(r[c.orders]) : 0]);
     }
-    return { camps: [...camps.values()], daily, wallet: null, columns: head };
+    return { camps: [...camps.values()], daily, wallet: null, columns: head, sample: R.slice(1, 4) };
   });
 
   if (Object.keys(err).length) out.err = err;
