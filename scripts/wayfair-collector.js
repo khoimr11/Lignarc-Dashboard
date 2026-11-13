@@ -36,7 +36,8 @@ function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = 
           X.setRequestHeader = function (k, v) { this._h.push([k, v]); return sh.apply(this, arguments); };
           X.send = function (b) { this.addEventListener('load', () => { if (re.test(this._u) && !BAD.test(this._u)) cap.push({ url: this._u, m: this._m, body: b, h: this._h, resp: typeof this.response === 'string' ? this.response : '' }); }); return os.apply(this, arguments); };
           // never let the iframe save files to disk
-          w.HTMLAnchorElement.prototype.click = function () { cap.push({ url: 'anchor:' + this.href, m: 'A', resp: '' }); };
+          const ac = w.HTMLAnchorElement.prototype.click;
+          w.HTMLAnchorElement.prototype.click = function () { if (/^(blob:|data:)/.test(this.href) || this.download) { cap.push({ url: 'anchor:' + this.href, m: 'A', resp: '' }); return; } return ac.apply(this, arguments); };
           w.open = () => null;
           hooked = true;
         }
