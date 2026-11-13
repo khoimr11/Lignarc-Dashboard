@@ -79,7 +79,8 @@ function buildModel() {
   const cogsOf = part => { const p = P[part]; if (p && p.cogs) return p.cogs; const f = famOf(part); const s = Object.values(P).find(x => x.fam === f && x.cogs); return s ? s.cogs : 0; };
   // Wayfair CastleGate orders (export rows)
   // [po, orderNo, date, status, retailer, state, country, part, sku, name, options, qty, wholesale, b2b, channel, shipped, warehouse]
-  const wfo = ((D.wf && D.wf.orders) || []).map(r => {
+  const SOV = (D.wf && D.wf.statusOv) || {};
+  const wfo = ((D.wf && D.wf.orders) || []).map(r0 => { const r = SOV[r0[0]] ? Object.assign([...r0], { 3: SOV[r0[0]] }) : r0;
     const tt = /tried/i.test(r[14] || '') || ((D.wf && D.wf.ttPOs) || []).includes(r[0]); const qty = +r[11] || 0, rev = (+r[12] || 0) * qty, part = r[7];
     const cogs = cogsOf(part) * qty;
     return { ch: 'wf', po: r[0], no: r[1], date: r[2], status: r[3], retailer: r[4], state: r[5], country: r[6], part, sku: r[8], name: r[9], opt: r[10], qty, price: +r[12] || 0, rev,
