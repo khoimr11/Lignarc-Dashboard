@@ -35,7 +35,7 @@ const HOWTO = {
 function record() {
   if (window.__lgwRec) return 'recording';
   window.__lgwRec = true;
-  const save = (url, method, body, h) => { const n = opName(body); if (!n || !WANT.test(n)) return; const ops = ls.get(OPS_KEY) || {};
+  const save = (url, method, body, h) => { if (!/\/graph|media_hub/.test(String(url || '')) || /datadog|events|rum/i.test(String(url || '')) || typeof body !== 'string' || body.length > 60000) return; const n = opName(body); if (!n || !WANT.test(n)) return; const ops = ls.get(OPS_KEY) || {};
     // keep the insights call that targets campaigns (has campaignLayerIds) in preference
     if (n === 'GetCampaignInsightsQuery' && ops[n] && /campaignLayerIds":\[\d/.test(ops[n].body) && !/campaignLayerIds":\[\d/.test(body)) return;
     ops[n] = { url, method: method || 'POST', body: String(body), h: hdrList(h), at: Date.now() }; ls.set(OPS_KEY, ops); L('recorded ' + n); };
