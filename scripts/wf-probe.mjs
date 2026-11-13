@@ -27,10 +27,12 @@ export default async function probe({ gql }) {
     const it = await gql(ORDER_API, '{__type(name:"SupplierPurchaseOrdersDateTimeIntervalInput"){inputFields{name}}}');
     const keys = ((it.data && it.data.__type && it.data.__type.inputFields) || []).map(f => f.name); P('interval keys', keys.join(','));
     const [kA, kB] = keys.length >= 2 ? keys : ['start', 'end'];
+    const wq = await gql('https://api.wayfair.com/v1/graphql', '{ getCastleGatePurchaseOrders(limit: 50) { poDate warehouse { id name } } }');
+    const whIds = [...new Set(((wq.data && wq.data.getCastleGatePurchaseOrders) || []).map(o => +o.warehouse.id))]; P('warehouses', JSON.stringify(whIds), 'poDate sample', JSON.stringify(((wq.data && wq.data.getCastleGatePurchaseOrders) || []).slice(0, 3).map(o => o.poDate)));
     const all = [];
     for (const hasResponse of [true, false]) for (let page = 1; page < 20; page++) {
       const r = await gql(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput!, $p: Int!, $ps: Int!){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:$p, pageSize:$ps){ totalCount pageInfo { hasNextPage } nodes { ${s} } } }`,
-        { i: { filter: { hasResponse, purchaseOrderDateTimeInterval: { [kA]: '2026-10-01T00:00:00Z', [kB]: new Date(Date.now() + 864e5).toISOString() } } }, p: page, ps: 50 });
+        { i: { filter: { hasResponse, warehouseIds: whIds, purchaseOrderDateTimeInterval: { [kA]: '2026-10-01T00:00:00Z', [kB]: new Date(Date.now() + 864e5).toISOString() } } }, p: page, ps: 50 });
       if (r.errors) { P('err', hasResponse, JSON.stringify(r.errors).slice(0, 700)); break; }
       const c = r.data.castlegatePurchaseOrders; all.push(...(c.nodes || []));
       P('page', hasResponse, page, (c.nodes || []).length, 'total', c.totalCount);
