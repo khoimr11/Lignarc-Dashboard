@@ -97,9 +97,10 @@ async function wayfair() {
   if (PROBE) {
     const out = {};
     for (const u of WF_ENDPOINTS) { try { const j = await gql(u, '{__schema{queryType{fields{name args{name}}}}}'); out[u] = ((j.data && j.data.__schema.queryType.fields) || []).map(f => f.name + '(' + f.args.map(a => a.name).join(',') + ')'); } catch (e) { out[u] = 'ERR ' + e.message.slice(0, 160); } }
-    try { const j = await gql('https://api.wayfair.com/v1/graphql', '{__schema{types{name kind fields{name type{name kind ofType{name kind ofType{name}}}} enumValues{name}}}}');
-      const T = ((j.data && j.data.__schema.types) || []).filter(t => /PurchaseOrder|ShippingAdvice|SalesEvent|OrderStatus|Shipping/i.test(t.name));
-      for (const t of T) console.log('TYPE', t.name, t.kind, (t.fields || []).map(f => f.name + ':' + (f.type.name || (f.type.ofType && (f.type.ofType.name || (f.type.ofType.ofType && f.type.ofType.ofType.name))))).join(', '), (t.enumValues || []).map(e => e.name).join('|'));
+    try { const j = await gql('https://api.wayfair.io/v1/supplier-order-api/graphql', '{__schema{types{name kind fields{name args{name} type{name kind ofType{name kind ofType{name ofType{name}}}}} enumValues{name} inputFields{name type{name kind ofType{name}}}}}}');
+      if (j.errors) console.log('types errors', JSON.stringify(j.errors).slice(0, 300));
+      const T = ((j.data && j.data.__schema.types) || []).filter(t => /^(SoCastlegate|InboundOrder|CastlegatePurchase|SupplierCastlegate)/i.test(t.name));
+      for (const t of T) console.log('TYPE', t.name, t.kind, (t.fields || []).map(f => f.name + (f.args && f.args.length ? '(' + f.args.map(a => a.name).join(',') + ')' : '') + ':' + (f.type.name || (f.type.ofType && (f.type.ofType.name || (f.type.ofType.ofType && (f.type.ofType.ofType.name || (f.type.ofType.ofType.ofType && f.type.ofType.ofType.ofType.name))))))).join(', '), (t.enumValues || []).map(e => e.name).join('|'), (t.inputFields || []).map(f => f.name + ':' + (f.type.name || (f.type.ofType && f.type.ofType.name))).join(', '));
     } catch (e) { console.log('types ERR', e.message.slice(0, 200)); }
     return out;
   }
