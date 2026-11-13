@@ -62,8 +62,18 @@ const S = { tab: 'overview', period: '30', channel: 'all', incTT: false, kpiAll:
 
 // ---------------- model ----------------
 const OK_STATUS = s => !/cancel|reject|void/i.test(s || '');
+const CAT_RULES = [[/tv stand|media console|entertainment/i, 'TV Stand'], [/nightstand|bedside/i, 'Nightstand'], [/floating|wall[- ]mounted|wall shelf/i, 'Floating Shelf'], [/cart/i, 'Utility Cart'], [/console|sideboard|buffet|credenza/i, 'Console'], [/bed/i, 'Bed'], [/shelf|bookcase|étagère|etagere/i, 'Shelving']];
 function buildModel() {
   const P = D.products || {};
+  // enrich product master from Wayfair (inventory API names/options and order export rows)
+  const enrich = (part, name, opt) => { if (!part) return; const p = P[part] = P[part] || { col: 'Khác', size: '—', color: '—', cat: '—' };
+    if (name && !p.name) p.name = name;
+    const c = String(opt || '').match(/Colou?r[^:]*:\s*([^,;]+)/i); if (c && (!p.color || p.color === '—')) p.color = c[1].trim();
+    if ((!p.cat || p.cat === '—') && name) { const r = CAT_RULES.find(([re]) => re.test(name)); if (r) p.cat = r[1]; }
+    if ((!p.col || p.col === 'Khác') && name) { const m = name.match(/\b(Calix|Zena|Caroline|Vestra|Kathryn|Vivian)\b/i); if (m) p.col = ({ kathryn: 'Calix', vivian: 'Zena' })[m[1].toLowerCase()] || m[1][0].toUpperCase() + m[1].slice(1).toLowerCase(); }
+    if ((!p.size || p.size === '—' || p.size === '?') && name) { const z = name.match(/(\d{2})\s*(?:''|"|”|in\b|inch)/i); if (z) p.size = z[1] + '"'; } };
+  for (const r of (D.wf && D.wf.inv) || []) enrich(r[0], r[12], r[13]);
+  for (const r of (D.wf && D.wf.orders) || []) enrich(r[7], r[9], r[10]);
   const famOf = part => (P[part] && P[part].fam) || null;
   const prod = part => P[part] || { col: 'Khác', size: '—', color: '—', cat: 'Khác', name: part };
   const cogsOf = part => { const p = P[part]; if (p && p.cogs) return p.cogs; const f = famOf(part); const s = Object.values(P).find(x => x.fam === f && x.cogs); return s ? s.cogs : 0; };
@@ -162,7 +172,8 @@ const dayList = r => { const out = []; for (let d = r.from; d <= r.to; d = addDa
 
 // ---------------- CastleGate free-storage model (FIFO by received date) ----------------
 function cgModel() {
-  const inb = ((D.wf && D.wf.inb) || []).filter(p => !/cancel/i.test(p.status));
+  const man = (D.wf && D.wf.inbItems) || {};
+  const inb = ((D.wf && D.wf.inb) || []).filter(p => !/cancel/i.test(p.status)).map(p => (p.items && p.items.length) ? p : { ...p, items: man[p.id] || man[p.po] || [] });
   const received = inb.filter(p => p.recvStart).sort((a, b) => a.recvStart.localeCompare(b.recvStart));
   const inv = new Map(((D.wf && D.wf.inv) || []).map(r => [r[0], { part: r[0], fam: r[1], inStock: Math.max(0, r[2] || 0), avail: Math.max(0, r[3] || 0), onOrder: r[4] || 0, retail: r[5], wholesale: r[6], aged: r[7] || 0, n3m: r[8] || 0, purch: r[9], status: r[10], supply: r[11] }]));
   const t = M.today, from30 = addDays(t, -29);
@@ -201,7 +212,7 @@ function viewOverview() {
   const amzBad = ((D.amz && D.amz.ads && D.amz.ads.camps) || []).filter(c => /PAYMENT/i.test(c[3] || ''));
   if (amzBad.length) al.push(`<div class="alert crit"><span class="ic">!</span><div><b>Amazon Ads: ${amzBad.length} chiến dịch đang dừng vì lỗi thanh toán</b><span>Trạng thái "Advertiser payment failure" — cập nhật phương thức thanh toán trong Amazon Ads &gt; Billing để quảng cáo chạy lại.</span></div></div>`);
   const oos = [...cg.inv.values()].filter(x => x.status === 'ACTIVE' && x.purch === 'PURCHASABLE' && x.avail <= 0);
-  const stockNoBuy = [...cg.inv.values()].filter(x => x.inStock > 0 && x.purch !== 'PURCHASABLE');
+  const stockNoBuy = [...cg.inv.values()].filter(x => x.inStock > 0 && x.purch != null && x.purch !== 'PURCHASABLE');
   if (stockNoBuy.length) al.push(`<div class="alert warn"><span class="ic">!</span><div><b>${stockNoBuy.length} SKU có hàng trong kho nhưng đang "Unpurchasable"</b><span>${stockNoBuy.map(x => esc(x.part) + ' (' + x.inStock + ')').join(', ')} — khách không mua được dù còn tồn.</span></div></div>`);
   if (oos.length) al.push(`<div class="alert warn"><span class="ic">!</span><div><b>${oos.length} SKU đang bán nhưng hết hàng khả dụng</b><span>${oos.map(x => esc(x.part)).join(', ')}</span></div></div>`);
   if (ttAll.length) al.push(`<div class="alert info"><span class="ic">★</span><div><b>${ttAll.length} đơn Tried &amp; True (review for free sample)</b><span>Đã tách khỏi doanh thu bán hàng${S.incTT ? ' — hiện đang được cộng vào số liệu theo lựa chọn bộ lọc' : ''}. Giá trị: ${usd(sum(ttAll, o => o.rev))}.</span></div></div>`);
@@ -299,7 +310,7 @@ function viewCastleGate() {
     ${card('Tồn kho theo Collection', '', '<div class="chart" id="cInvCol"></div>')}
     ${card('Chi tiết tồn kho theo SKU', 'Days of cover = tồn khả dụng ÷ tốc độ bán 30 ngày', `<div class="tbl-wrap"><table><thead><tr><th>SKU</th><th class="num">Trong kho</th><th class="num">Khả dụng</th><th class="num">Đang về</th><th class="num">Bán 30n</th><th class="num">Days of cover</th><th class="num">Tồn &gt;90n</th><th class="num">Dự báo 3T</th><th>Trạng thái</th></tr></thead><tbody>
       ${inv.map(x => { const pr = M.prod(x.part), s30 = cg.sold30.get(x.part) || 0, doc = s30 ? x.avail / (s30 / 30) : null;
-        return `<tr><td><div class="sku"><span class="dot" style="background:${colColor(pr.col)}"></span><div><b>${esc(x.part)}</b><small>${esc(pr.col)} ${esc(pr.size)} · ${esc(pr.color)}</small></div></div></td><td class="num"><b>${x.inStock}</b></td><td class="num">${x.avail}</td><td class="num">${x.onOrder || 0}</td><td class="num">${s30}</td><td class="num">${doc == null ? '—' : Math.round(doc) + 'n'}</td><td class="num">${x.aged || 0}</td><td class="num">${x.n3m || 0}</td><td>${x.purch === 'PURCHASABLE' ? '<span class="pill good"><i></i>Đang bán</span>' : '<span class="pill crit"><i></i>Không mua được</span>'}</td></tr>`; }).join('')}
+        return `<tr><td><div class="sku"><span class="dot" style="background:${colColor(pr.col)}"></span><div><b>${esc(x.part)}</b><small>${esc(pr.col)} ${esc(pr.size)} · ${esc(pr.color)}</small></div></div></td><td class="num"><b>${x.inStock}</b></td><td class="num">${x.avail}</td><td class="num">${x.onOrder || 0}</td><td class="num">${s30}</td><td class="num">${doc == null ? '—' : Math.round(doc) + 'n'}</td><td class="num">${x.aged || 0}</td><td class="num">${x.n3m || 0}</td><td>${x.purch == null ? (x.inStock > 0 ? '<span class="pill good"><i></i>Có hàng</span>' : '<span class="pill muted"><i></i>Hết hàng</span>') : x.purch === 'PURCHASABLE' ? '<span class="pill good"><i></i>Đang bán</span>' : '<span class="pill crit"><i></i>Không mua được</span>'}</td></tr>`; }).join('')}
     </tbody></table></div>`, `<button class="view-toggle" id="invAll">${S.invAll ? 'Ẩn SKU tồn 0' : 'Hiện tất cả ' + invAll.length + ' SKU'}</button>`)}
   </div>`;
 }
@@ -405,7 +416,8 @@ function viewAmazon() {
 const VIEWS = { overview: [viewOverview, afterOverview], castlegate: [viewCastleGate, afterCastleGate], sales: [viewSales, afterSales], ads: [viewAds, afterAds], amazon: [viewAmazon, () => {}] };
 function render() {
   const [v, after] = VIEWS[S.tab];
-  $('#view').innerHTML = v(); after();
+  const noData = !((D.wf && (D.wf.inv || D.wf.orders)) || (D.amz && (D.amz.orders || D.amz.ads)));
+  $('#view').innerHTML = (noData ? `<section class="card glass"><div class="alert info"><span class="ic">⟳</span><div><b>Đang chờ kết nối API Wayfair &amp; Amazon</b><span>Dashboard đã sẵn sàng; số liệu bán hàng, tồn kho và quảng cáo sẽ tự hiện sau lần đồng bộ API đầu tiên (chạy tự động mỗi ngày 14:23). KPI và giá vốn đã có.</span></div></div></section>` : '') + v(); after();
   $$('[data-toggle]').forEach(b => b.onclick = () => { const t = $('#' + b.dataset.toggle); t.hidden = !t.hidden; b.textContent = t.hidden ? 'Bảng' : 'Ẩn bảng'; });
   $('#filters').style.display = S.tab === 'amazon' ? 'none' : '';
 }

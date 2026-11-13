@@ -87,10 +87,10 @@ async function amazonAds(days) {
 // Advertising queries are filled in from the sandbox schema (see `--probe`) once the app exists.
 async function wayfairToken() {
   const j = await http('https://sso.auth.wayfair.com/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ grant_type: 'client_credentials', client_id: E.WF_CLIENT_ID, client_secret: E.WF_CLIENT_SECRET, audience: E.WF_AUDIENCE || 'https://api.wayfair.io/' }) });
+    body: JSON.stringify({ grant_type: 'client_credentials', client_id: E.WF_CLIENT_ID, client_secret: E.WF_CLIENT_SECRET, ...(E.WF_AUDIENCE ? { audience: E.WF_AUDIENCE } : {}) }) });
   return j.access_token;
 }
-const WF_ENDPOINTS = (E.WF_ENDPOINTS || 'https://api.wayfair.com/v1/graphql').split(',');
+const WF_ENDPOINTS = (E.WF_ENDPOINTS || 'https://api.wayfair.io/v1/supplier-order-api/graphql,https://api.wayfair.com/v1/graphql').split(',');
 async function wayfair() {
   const tok = await wayfairToken();
   const gql = (url, query, variables) => http(url, { method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'content-type': 'application/json' }, body: JSON.stringify({ query, variables }) });
