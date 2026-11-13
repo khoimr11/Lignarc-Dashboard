@@ -1,211 +1,169 @@
-/* Lignarc · Wayfair Partner Home collector
- * Run in a logged-in https://partners.wayfair.com tab:  await LGW.run()
- * Reads the pages' own (registered) GraphQL calls inside hidden same-origin iframes and replays
- * them with wider variables. No file is downloaded to disk. Customer names/addresses are dropped.
+/* Lignarc · Wayfair Partner Home collector (v2 — no hidden iframes)
+ *
+ * Wayfair only accepts GraphQL operations registered by its own pages, so this script records the
+ * exact requests the pages make (LGW.record(), stored in this browser's localStorage) and replays them
+ * later with wider variables. Nothing is downloaded to disk; customer names/addresses are dropped.
+ *
+ * Daily run (any partners.wayfair.com page):
+ *   await LGW.collect()            -> inventory, catalogue, inbound POs, ads; queues the orders export
+ *   go to /d/download-center, load script again, then:
+ *   await LGW.grabExport()         -> reads the queued CastleGate orders CSV in-page
+ *   LGW.send()  + click the centred button once  -> hands everything to sync.html
+ *
+ * If collect() reports missing ops, record them once:  LGW.record() on the page, then interact
+ * (see LGW.HOWTO) so the page fires the request, then LGW.saved() to check.
  */
 (() => {
 'use strict';
-const SUP = '467016';
-const BAD = /datadog|events\/single|conviva|toggle|nav-menu|layout|appcues|analytics|fullstory/;
+const OPS_KEY = 'lgw-ops', OUT_KEY = 'lgw-out';
+const ls = { get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const log = [];
-const L = m => { log.push(new Date().toISOString().slice(11, 19) + ' ' + m); };
-
-// open a same-origin page in an iframe and record its network calls (+ request headers)
-function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = false, until } = {}) {
-  return new Promise(res => {
-    const f = document.createElement('iframe');
-    f.className = 'lgh';
-    // sandbox: no top-level navigation, no popups, no downloads from the hidden page
-    f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
-    f.style.cssText = vis ? 'position:fixed;left:0;top:0;width:1440px;height:900px;opacity:.01;pointer-events:none;z-index:-1;border:0'
-                          : 'position:fixed;left:-3000px;top:0;width:1440px;height:900px';
-    const cap = []; let hooked = false; const t0 = Date.now();
-    f.src = path; document.body.appendChild(f);
-    const tick = () => {
-      try {
-        const w = f.contentWindow;
-        if (!hooked && w && w.location.href.includes(path.split('?')[0]) && w.fetch) {
-          const of = w.fetch;
-          w.fetch = async function (u, o) {
-            const url = typeof u === 'string' ? u : u.url;
-            const r = await of.apply(this, arguments);
-            if (re.test(url) && !BAD.test(url)) r.clone().text().then(t => cap.push({ url, m: (o && o.method) || 'GET', body: o && o.body, h: o && o.headers, resp: t }));
-            return r;
-          };
-          const X = w.XMLHttpRequest.prototype, oo = X.open, os = X.send, sh = X.setRequestHeader;
-          X.open = function (m, u) { this._u = u; this._m = m; this._h = []; return oo.apply(this, arguments); };
-          X.setRequestHeader = function (k, v) { this._h.push([k, v]); return sh.apply(this, arguments); };
-          X.send = function (b) { this.addEventListener('load', () => { if (re.test(this._u) && !BAD.test(this._u)) cap.push({ url: this._u, m: this._m, body: b, h: this._h, resp: typeof this.response === 'string' ? this.response : '' }); }); return os.apply(this, arguments); };
-          // never let the iframe save files to disk
-          hooked = true;
-        }
-      } catch (e) {}
-      const done = until && hooked && until(cap, f);
-      if (!done && Date.now() - t0 < ms) setTimeout(tick, hooked ? 400 : 15);
-      else res({ f, cap, hooked });
-    };
-    tick();
-  });
+const log = []; const L = m => { log.push(new Date().toISOString().slice(11, 19) + ' ' + m); };
+const opName = b => (String(b || '').match(/operationName"\s*:\s*"(\w+)/) || String(b || '').match(/(?:query|mutation)\s+(\w+)/) || [])[1];
+const hdrList = h => (h instanceof Headers ? [...h.entries()] : Array.isArray(h) ? h : Object.entries(h || {})).filter(([k]) => !/content-length|x-parent-txid/i.test(k));
+const WANT = /GetOverviewViewUIQuery|fullAndPendingProductSearchV2|OrderListData|OrderDetailsData|TriggerCgOrderExport|GetCampaignsQuery|GetCampaignInsightsQuery|GetWalletSummaryQuery/;
+const HOWTO = {
+  GetOverviewViewUIQuery: '/d/inventory/overview → click a column header (e.g. In Stock) to sort',
+  fullAndPendingProductSearchV2: '/d/products/product-management/lists/performance → click a column header to sort',
+  OrderListData: '/d/manage-inbound-orders → change Rows per Page',
+  OrderDetailsData: '/d/manage-inbound-orders → click an inbound order ID (same tab)',
+  TriggerCgOrderExport: '/d/orders/castlegate/sc → Export All → Export (queues a CSV in Download Center)',
+  GetCampaignsQuery: '/d/advertising/campaign → change Date Range',
+  GetCampaignInsightsQuery: '/d/advertising/campaign → change Date Range',
+  GetWalletSummaryQuery: '/d/advertising/campaign (fires on load; optional)'
+};
+// ---- recorder: keeps the latest request of each wanted operation (url, body, headers) ----
+function record() {
+  if (window.__lgwRec) return 'recording';
+  window.__lgwRec = true;
+  const save = (url, method, body, h) => { const n = opName(body); if (!n || !WANT.test(n)) return; const ops = ls.get(OPS_KEY) || {};
+    // keep the insights call that targets campaigns (has campaignLayerIds) in preference
+    if (n === 'GetCampaignInsightsQuery' && ops[n] && /campaignLayerIds":\[\d/.test(ops[n].body) && !/campaignLayerIds":\[\d/.test(body)) return;
+    ops[n] = { url, method: method || 'POST', body: String(body), h: hdrList(h), at: Date.now() }; ls.set(OPS_KEY, ops); L('recorded ' + n); };
+  const of = window.fetch;
+  window.fetch = function (u, o) { try { save(typeof u === 'string' ? u : u.url, o && o.method, o && o.body, o && o.headers); } catch (e) {} return of.apply(this, arguments); };
+  const X = XMLHttpRequest.prototype, oo = X.open, os = X.send, sh = X.setRequestHeader;
+  X.open = function (m, u) { this.__u = u; this.__m = m; this.__h = []; return oo.apply(this, arguments); };
+  X.setRequestHeader = function (k, v) { (this.__h = this.__h || []).push([k, v]); return sh.apply(this, arguments); };
+  X.send = function (b) { try { save(this.__u, this.__m, b, this.__h); } catch (e) {} return os.apply(this, arguments); };
+  return 'recording';
 }
-const opName = c => (String(c.body || '').match(/operationName"\s*:\s*"(\w+)/) || String(c.body || '').match(/query\s+(\w+)/) || [])[1];
-const find = (cap, name) => cap.filter(c => opName(c) === name).pop();
-const has = name => cap => cap.some(c => opName(c) === name);
-function hdrs(c) { const h = c.h instanceof Headers ? [...c.h.entries()] : Array.isArray(c.h) ? c.h : Object.entries(c.h || {}); return h.filter(([k]) => !/content-length/i.test(k)); }
-async function replay(c, vars) {
-  const b = JSON.parse(c.body);
+async function replay(name, vars) {
+  const op = (ls.get(OPS_KEY) || {})[name]; if (!op) throw new Error('missing op ' + name + ' — ' + HOWTO[name]);
+  const b = JSON.parse(op.body);
   if (vars) b.variables = typeof vars === 'function' ? vars(JSON.parse(JSON.stringify(b.variables || {}))) : vars;
-  const r = await fetch(c.url, { method: 'POST', credentials: 'include', headers: hdrs(c), body: JSON.stringify(b) });
-  const j = await r.json(); if (j.errors && !j.data) throw new Error(opName(c) + ': ' + JSON.stringify(j.errors).slice(0, 200)); return j.data;
+  const r = await fetch(op.url, { method: 'POST', credentials: 'include', headers: op.h, body: JSON.stringify(b) });
+  const t = await r.text(); let j; try { j = JSON.parse(t); } catch (e) { throw new Error(name + ' HTTP ' + r.status + ' ' + t.slice(0, 120)); }
+  if ((j.errors && !j.data) || !r.ok) throw new Error(name + ': ' + JSON.stringify(j.errors || j).slice(0, 200) + ' — re-record: ' + HOWTO[name]);
+  return j.data;
 }
-const clear = () => document.querySelectorAll('iframe.lgh').forEach(f => f.remove());
-function csv(t) { const rows = []; let r = [], c = '', q = false; for (let i = 0; i < t.length; i++) { const ch = t[i]; if (q) { if (ch === '"') { if (t[i + 1] === '"') { c += '"'; i++; } else q = false; } else c += ch; } else if (ch === '"') q = true; else if (ch === ',') { r.push(c); c = ''; } else if (ch === '\n') { r.push(c.replace(/\r$/, '')); rows.push(r); r = []; c = ''; } else c += ch; } if (c || r.length) { r.push(c); rows.push(r); } return rows; }
-const num = v => { const n = parseFloat(String(v).replace(/[$,]/g, '')); return isNaN(n) ? null : Math.round(n * 100) / 100; };
 const day = s => s ? String(s).slice(0, 10) : null;
 const mdy = s => { const m = String(s || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : null; };
+const num = v => { const n = parseFloat(String(v).replace(/[$,]/g, '')); return isNaN(n) ? null : Math.round(n * 100) / 100; };
+function csv(t) { const rows = []; let r = [], c = '', q = false; for (let i = 0; i < t.length; i++) { const ch = t[i]; if (q) { if (ch === '"') { if (t[i + 1] === '"') { c += '"'; i++; } else q = false; } else c += ch; } else if (ch === '"') q = true; else if (ch === ',') { r.push(c); c = ''; } else if (ch === '\n') { r.push(c.replace(/\r$/, '')); rows.push(r); r = []; c = ''; } else c += ch; } if (c || r.length) { r.push(c); rows.push(r); } return rows; }
 
-// ---------- inventory (CastleGate network) ----------
 async function inventory() {
-  const { cap } = await hook('/d/inventory/overview', { until: has('GetOverviewViewUIQuery'), re: /graph/ });
-  const c = find(cap, 'GetOverviewViewUIQuery'); if (!c) throw new Error('inventory op not found');
-  const d = await replay(c, v => ({ ...v, pageNumber: 1, pageSize: 200, partStatus: null }));
+  const d = await replay('GetOverviewViewUIQuery', v => ({ ...v, pageNumber: 1, pageSize: 200, partStatus: null }));
   return d.phiSupplierPartsInventoryUi.supplierParts.map(p => [p.supplierPartNumber, p.sku, p.castlegateNetworkInStock, p.castlegateNetworkAvailable, p.totalOnOrder, p.retailPrice, p.wholeSaleCost, p.agedUnits90Plus, p.next3monthForecast, p.purchasabilityStatus, p.partStatus, p.supplyStatus]);
 }
-// ---------- catalogue performance (Product Management) ----------
 async function products() {
-  const { cap } = await hook('/d/products/product-management/lists/performance', { until: has('fullAndPendingProductSearchV2'), re: /graph/ });
-  const c = find(cap, 'fullAndPendingProductSearchV2'); if (!c) return [];
-  let d; try { d = JSON.parse(c.resp).data; } catch (e) { return []; }
+  const d = await replay('fullAndPendingProductSearchV2', v => { const s = JSON.stringify(v); return JSON.parse(s.replace(/"(pageSize|rows|limit|perPage)":\d+/g, '"$1":200').replace(/"(page|pageNumber)":\d+/g, '"$1":1')); });
   const k = Object.keys(d).find(k => d[k] && d[k].numFound !== undefined) || Object.keys(d)[0];
   const arr = Object.values(d[k]).find(Array.isArray) || [];
-  return arr.map(x => { const p = x.part || {}; return [p.partNumber, x.bestSku, x.revenue, x.unitsSold, x.skuImpressions, x.uniqueVisits, x.conversionRate, x.reviewsCount && x.reviewsCount.value, x.launchDate, x.productStatus && x.productStatus.displayText, p.thumbnail && p.thumbnail.imageId]; });
+  return arr.map(x => { const p = x.part || {}; return [p.partNumber, x.bestSku, x.revenue, x.unitsSold, x.skuImpressions, x.uniqueVisits, x.conversionRate, x.reviewsCount && x.reviewsCount.value, x.launchDate, x.productStatus && x.productStatus.displayText]; });
 }
-// ---------- CastleGate inbound POs ----------
 async function inbound() {
-  const { cap } = await hook('/d/manage-inbound-orders', { until: has('OrderListData'), re: /graph/ });
-  const c = find(cap, 'OrderListData'); if (!c) throw new Error('inbound list op not found');
-  const d = await replay(c, v => { v.paginate = { limit: 100, offset: 0 }; if (v.filter) delete v.filter.statuses; return v; });
-  const root = Object.values(d).find(x => x && typeof x === 'object');
-  const nodes = (root && (root.nodes || (root.edges || []).map(e => e.node))) || [];
-  if (!nodes.length) return [];
-  const det = await hook('/d/manage-inbound-orders/order/' + nodes[0].id, { until: has('OrderDetailsData'), re: /graph/ });
-  const dc = find(det.cap, 'OrderDetailsData'); if (!dc) throw new Error('inbound detail op not found');
+  const d = await replay('OrderListData', v => { v.paginate = { limit: 100, offset: 0 }; if (v.filter) { delete v.filter.statuses; delete v.filter.status; } return v; });
+  const root = Object.values(d).find(x => x && typeof x === 'object'); const nodes = (root && (root.nodes || (root.edges || []).map(e => e.node))) || [];
   const out = [];
   for (const n of nodes) {
-    const io = (await replay(dc, { id: n.id })).inboundOrder;
-    const ms = {};
+    if (/CANCEL/i.test(n.status || '')) { out.push({ id: n.displayId, status: n.status, created: day(n.originalCreatedDate), items: [] }); continue; }
+    const io = (await replay('OrderDetailsData', { id: n.id })).inboundOrder; const ms = {};
     for (const s of io.shipments || []) for (const t of s.timeline || []) for (const a of t.attributes || []) ms[(t.descriptor || '') + ':' + a.type] = a.value;
     const items = new Map();
     for (const li of (io.orderLineItems && io.orderLineItems.nodes) || []) items.set(li.partNumber, [li.partNumber, li.plannedQuantity || 0, 0, 0]);
     for (const s of io.shipments || []) for (const li of s.shipmentOrderLineItems || []) { const it = items.get(li.partNumber) || [li.partNumber, 0, 0, 0]; it[2] += li.shippedQuantity || 0; it[3] += li.receivedQuantity || 0; items.set(li.partNumber, it); }
-    const sh = (io.shipments || [])[0] || {};
-    out.push({ id: io.displayId, po: io.purchaseOrderNumber, status: io.status, created: day(io.originalCreatedDate), ready: io.estimatedCargoReadyDate,
-      dest: (io.shipperBookings && io.shipperBookings[0] && io.shipperBookings[0].destination && io.shipperBookings[0].destination.name) || null,
-      eta: sh.estimatedArrivalDate || (sh.predictedETAToDestination && (sh.predictedETAToDestination.value || sh.predictedETAToDestination)) || null,
-      loadAtd: ms['PLACE_OF_RECEIPT_AND_PORT_OF_LOADING:ATD'] || null, portAta: ms['PORT_OF_DISCHARGE:ATA'] || null,
+    const sh = (io.shipments || [])[0] || {}, bk = (io.shipperBookings || [])[0] || {};
+    out.push({ id: io.displayId, po: io.purchaseOrderNumber, status: io.status, created: day(io.originalCreatedDate), ready: io.estimatedCargoReadyDate, dest: (bk.destination && bk.destination.name) || null,
+      eta: sh.estimatedArrivalDate || null, loadAtd: ms['PLACE_OF_RECEIPT_AND_PORT_OF_LOADING:ATD'] || null, portAta: ms['PORT_OF_DISCHARGE:ATA'] || null,
       whAta: ms['DESTINATION:ATA'] || null, recvStart: ms['DESTINATION:RECEIVING_START'] || null, emptied: ms['DESTINATION:CONTAINER_EMPTIED_DATE'] || null,
-      cbm: sh.totalShipmentVolume ? sh.totalShipmentVolume.value : null, container: sh.containerNumber || sh.friendlyName || null,
-      items: [...items.values()] });
+      cbm: sh.totalShipmentVolume ? sh.totalShipmentVolume.value : null, container: sh.containerNumber || sh.friendlyName || null, items: [...items.values()] });
   }
   return out;
 }
-// ---------- CastleGate orders (export CSV, all orders last 18 months) ----------
-async function orders() {
-  const pg = await hook('/d/orders/castlegate/sc', { re: /graph/, until: has('CastleGateOrderListSingleChannel') });
-  const doc = pg.f.contentDocument;
-  const waitFor = async (fn, t = 15000) => { const t0 = Date.now(); let v; while (!(v = fn()) && Date.now() - t0 < t) await sleep(300); return v; };
-  const link = await waitFor(() => doc.querySelector('[data-cypress-id=cg-export-toolbar-export-all]')); if (!link) throw new Error('Export All link not found');
-  let dlg = null;
-  for (let i = 0; i < 12 && !dlg; i++) { await sleep(2000); link.click(); dlg = await waitFor(() => doc.querySelector('[role=dialog]'), 1500); }
-  if (!dlg) throw new Error('export dialog not found');
-  await sleep(800);
-  const radios = [...dlg.querySelectorAll('input[type=radio]')];
-  const all = radios.find(r => /All Orders/i.test((r.closest('label') || r.parentElement.parentElement || {}).textContent || '')) || radios[0];
-  if (all && !all.disabled) { all.click(); await sleep(400); }
-  const btn = await waitFor(() => [...dlg.querySelectorAll('button')].find(b => b.textContent.trim() === 'Export')); if (!btn) throw new Error('Export button not found');
-  btn.click();
-  let exportId = null;
-  for (let i = 0; i < 30 && !exportId; i++) { await sleep(500); const c = pg.cap.find(c => /triggerExport/.test(c.resp)); if (c) exportId = JSON.parse(c.resp).data.soCastlegateOrders.triggerExport.exportId; }
-  if (!exportId) throw new Error('export not queued');
-  L('export ' + exportId);
-  // the Download Center page calls api.wayfair.io with a bearer token: borrow it, then read our file directly (nothing is clicked or saved)
-  const auth = c => hdrs(c).find(([k]) => /^authorization$/i.test(k));
-  const dc = await hook('/d/download-center', { re: /wayfair\.io|download-center/, ms: 25000, until: cap => cap.some(auth) });
-  const ac = dc.cap.find(auth); dc.f.remove();
-  if (!ac) throw new Error('download-center token not found: ' + dc.cap.map(c => c.url.split('?')[0]).join(','));
-  const AH = hdrs(ac).filter(([k]) => /^(authorization|accept|x-requested-with)$/i.test(k));
-  let text = null;
-  for (let attempt = 0; attempt < 18 && !text; attempt++) {
-    await sleep(attempt ? 8000 : 4000);
-    try { const r = await fetch('https://api.wayfair.io/download-center/file/' + exportId, { headers: AH }); if (r.ok) { const t = await r.text(); if (/^﻿?Supplier,/.test(t)) text = t.replace(/^﻿/, ''); } } catch (e) {}
-  }
-  if (!text) throw new Error('export file not ready');
-  const R = csv(text.trim()); const H = R[0]; const ix = n => H.indexOf(n);
-  const col = { oid: ix('Order ID'), ord: ix('Order #'), ret: ix('Retailer'), po: ix('PO Number'), pod: ix('PO Date'), ship: ix('Shipped Date'), st: ix('Order Status'), wh: ix('Warehouse Name'), state: ix('Ship To State'), country: ix('Country'), part: ix('Item Number'), sku: ix('SKU'), name: ix('Item Name'), opt: ix('Options'), qty: ix('Quantity'), price: ix('Wholesale Price'), b2b: ix('B2BOrder'), ch: ix('Sales Channel'), mustShip: ix('Must Ship By') };
-  return R.slice(1).filter(r => r.length > 10).map(r => [r[col.po], r[col.ord], mdy(r[col.pod]), r[col.st], r[col.ret], r[col.state], r[col.country], r[col.part], r[col.sku], r[col.name], r[col.opt], num(r[col.qty]), num(r[col.price]), r[col.b2b], r[col.ch], mdy(r[col.ship]), r[col.wh]]);
-}
-// ---------- Advertising ----------
 async function ads(from) {
-  const { cap } = await hook('/d/advertising/campaign', { re: /media_hub/, ms: 60000, vis: true, until: cap => cap.some(c => opName(c) === 'GetCampaignInsightsQuery' && /campaignLayerIds":\[\d/.test(c.body)) && cap.filter(c => opName(c) === 'GetCampaignsQuery').some(c => c.resp.length > 400) });
-  const camps = cap.filter(c => opName(c) === 'GetCampaignsQuery').sort((a, b) => b.resp.length - a.resp.length)[0];
-  if (!camps) throw new Error('ads ops not captured: ' + cap.map(opName).join(','));
-  const ins = cap.filter(c => opName(c) === 'GetCampaignInsightsQuery').find(c => /campaignLayerIds":\[\d/.test(c.body)) || find(cap, 'GetCampaignInsightsQuery');
-  const wallet = find(cap, 'GetWalletSummaryQuery');
-  const gc = JSON.parse(camps.resp).data.getCampaigns || {};
-  const list = gc.campaigns || Object.values(gc).find(Array.isArray) || [];
+  const cd = await replay('GetCampaignsQuery'); const gc = cd.getCampaigns || {}; const list = gc.campaigns || Object.values(gc).find(Array.isArray) || [];
   const C = list.map(x => { const m = x.campaignMetadata || {}; return [x.campaignKey.campaignLayerId, m.campaignName, m.statusId, m.startDate, m.endDate || null, m.dailyCap, m.campaignLayerTypeId, m.biddingStrategy]; });
-  const to = new Date(Date.now() - 4 * 3600e3).toISOString().slice(0, 10);
-  const daily = [];
+  const to = new Date(Date.now() - 4 * 3600e3).toISOString().slice(0, 10); const daily = [];
   for (const c of C) {
-    const d = await replay(ins, v => ({ ...v, campaignLayerIds: [c[0]], aggregationType: 'DAY', filters: { 0: { key: 'START_DATE', value: from }, 1: { key: 'END_DATE', value: to } } }));
+    const d = await replay('GetCampaignInsightsQuery', v => ({ ...v, campaignLayerIds: [c[0]], aggregationType: 'DAY', filters: { 0: { key: 'START_DATE', value: from }, 1: { key: 'END_DATE', value: to } } }));
     for (const x of d.getCampaignInsights || []) { const r = x.insightsRecord || {}; if (!(r.impressions || r.spend || r.clicks)) continue; daily.push([c[0], (r.keyAsString || '').slice(0, 10), r.impressions || 0, r.clicks || 0, r.spend || 0, r.attributedUnits || 0, r.attributedRetailSales || 0, r.attributedOrders || 0]); }
   }
-  let w = null; try { const ws = JSON.parse(wallet.resp).data.getPartnerWalletSummary; w = { balance: ws.walletBalance ?? ws.balance ?? null, dailyCap: ws.dailyCap ?? null, raw: ws }; } catch (e) {}
-  return { camps: C, daily, wallet: w };
+  let wallet = null; try { const w = (await replay('GetWalletSummaryQuery')).getPartnerWalletSummary; wallet = { balance: w.walletBalance ?? w.balance ?? w.availableBalance ?? null, dailyCap: w.dailyCap ?? null, raw: w }; } catch (e) {}
+  return { camps: C, daily, wallet };
 }
-
-
-// ---------- hand the payload to the sync page (needs one real click to open the window) ----------
-const SYNC_URL = 'https://khoimr11.github.io/Lignarc-Dashboard/sync.html';
+async function queueExport() {
+  const d = await replay('TriggerCgOrderExport', v => { if (v.input) { v.input.exportAll = true; v.input.selected = []; } return v; });
+  const t = d.soCastlegateOrders.triggerExport; if (!t.success) throw new Error('export not queued: ' + t.message); return t.exportId;
+}
+function parseOrders(text) {
+  const R = csv(text.replace(/^﻿/, '').trim()); const H = R[0]; const ix = n => H.indexOf(n);
+  const col = { ord: ix('Order #'), ret: ix('Retailer'), po: ix('PO Number'), pod: ix('PO Date'), ship: ix('Shipped Date'), st: ix('Order Status'), wh: ix('Warehouse Name'), state: ix('Ship To State'), country: ix('Country'), part: ix('Item Number'), sku: ix('SKU'), name: ix('Item Name'), opt: ix('Options'), qty: ix('Quantity'), price: ix('Wholesale Price'), b2b: ix('B2BOrder'), ch: ix('Sales Channel') };
+  if (col.po < 0 || col.part < 0) throw new Error('unexpected export columns');
+  return R.slice(1).filter(r => r.length > 10).map(r => [r[col.po], r[col.ord], mdy(r[col.pod]), r[col.st], r[col.ret], r[col.state], r[col.country], r[col.part], r[col.sku], r[col.name], r[col.opt], num(r[col.qty]), num(r[col.price]), r[col.b2b], r[col.ch], mdy(r[col.ship]), r[col.wh]]);
+}
+// On /d/download-center: click the newest completed CastleGate export and read the file response in-page
+async function grabExport() {
+  if (!/download-center/.test(location.pathname)) throw new Error('open /d/download-center first');
+  const out = ls.get(OUT_KEY) || {}; let text = null;
+  const of = window.fetch;
+  window.fetch = async function (u, o) { const url = typeof u === 'string' ? u : u.url; const r = await of.apply(this, arguments); if (/download-center\/file/.test(url)) { try { const t = await r.clone().text(); if (/Supplier,|Order ID/.test(t.slice(0, 400))) text = t; } catch (e) {} } return r; };
+  // keep the file in memory: neutralise the save-to-disk step on this page only
+  const oCreate = URL.createObjectURL; URL.createObjectURL = () => 'about:blank#lg-kept-in-memory';
+  const aClick = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download || /^blob:|about:blank#lg/.test(this.href)) return; return aClick.apply(this, arguments); };
+  try {
+    for (let i = 0; i < 30 && !text; i++) {
+      const row = [...document.querySelectorAll('table tbody tr')].find(r => /CastleGate_SC_Export/.test(r.textContent));
+      if (row && /Complete/i.test(row.textContent)) { const b = row.querySelector('button, a'); if (b) b.click(); for (let k = 0; k < 20 && !text; k++) await sleep(500); }
+      else { await sleep(6000); const btn = [...document.querySelectorAll('button')].find(b => /^Apply$/i.test(b.textContent.trim())); if (btn && !btn.disabled) btn.click(); else if (i % 3 === 2) { location.reload(); return 'reloading — load the script again and call grabExport()'; } }
+    }
+  } finally { window.fetch = of; URL.createObjectURL = oCreate; HTMLAnchorElement.prototype.click = aClick; }
+  if (!text) throw new Error('export file not ready yet — wait a minute and run grabExport() again');
+  out.orders = parseOrders(text); out.at = Math.floor(Date.now() / 1000); ls.set(OUT_KEY, out); L('orders ' + out.orders.length);
+  return JSON.stringify({ orders: out.orders.length, tt: out.orders.filter(r => /tried/i.test(r[14] || '')).length });
+}
+async function collect({ adsFrom = '2026-09-01' } = {}) {
+  if (!/partners\.wayfair\.com/.test(location.host)) throw new Error('Run on partners.wayfair.com');
+  const out = { v: 2, src: 'wayfair', at: Math.floor(Date.now() / 1000) }, err = {};
+  const step = async (k, fn) => { try { out[k] = await fn(); L(k + ' ok'); } catch (e) { err[k] = String(e.message || e).slice(0, 240); L(k + ' FAIL ' + err[k]); } };
+  await step('inv', inventory); await step('prod', products); await step('inb', inbound); await step('ads', () => ads(adsFrom));
+  await step('exportId', queueExport);
+  if (Object.keys(err).length) out.err = err;
+  ls.set(OUT_KEY, out);
+  return JSON.stringify({ inv: (out.inv || []).length, prod: (out.prod || []).length, inb: (out.inb || []).length, adsDays: out.ads ? out.ads.daily.length : 0, exportId: out.exportId || null, err: out.err || null });
+}
+// ---- hand the payload to the sync page (one real click opens the window) ----
+const SYNC_URL = 'https://khoimr11.github.io/Lignarc-Dashboard/sync.html', SYNC_ORIGIN = 'https://khoimr11.github.io';
 function sendButton(payload) {
-  return new Promise((resolve) => {
-    const id = Math.random().toString(36).slice(2);
-    let w = null, posted = false;
-    const b = document.createElement('button');
-    b.id = 'lg-send'; b.textContent = 'Lignarc · Gửi dữ liệu';
+  return new Promise(resolve => {
+    const id = Math.random().toString(36).slice(2); let w = null, posted = false;
+    const b = document.createElement('button'); b.id = 'lg-send'; b.textContent = 'Lignarc · Gửi dữ liệu';
     b.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;padding:22px 38px;font:600 20px -apple-system,Segoe UI,sans-serif;background:#3d312d;color:#fff;border:0;border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.35);cursor:pointer';
-    const post = () => { if (w && !posted) { posted = true; w.postMessage({ type: 'lg-data', id, payload }, 'https://khoimr11.github.io'); b.textContent = 'Đang ghi dữ liệu…'; } };
-    const onMsg = e => {
-      if (e.origin !== 'https://khoimr11.github.io' || !e.data) return;
-      if (e.data.type === 'lg-sync-ready') post();
-      if (e.data.type === 'lg-ack' && e.data.id === id) { removeEventListener('message', onMsg); b.remove(); window.LG_LAST_ACK = e.data; resolve(e.data); }
-    };
+    const post = () => { if (w && !posted) { posted = true; w.postMessage({ type: 'lg-data', id, payload }, SYNC_ORIGIN); b.textContent = 'Đang ghi dữ liệu…'; } };
+    const onMsg = e => { if (e.origin !== SYNC_ORIGIN || !e.data) return; if (e.data.type === 'lg-sync-ready') post(); if (e.data.type === 'lg-ack' && e.data.id === id) { removeEventListener('message', onMsg); b.remove(); window.LG_LAST_ACK = e.data; resolve(e.data); } };
     addEventListener('message', onMsg);
-    b.onclick = () => { w = window.open(SYNC_URL, 'lgsync'); if (!w) { b.textContent = 'Trình duyệt chặn cửa sổ — cho phép pop-up rồi bấm lại'; return; } b.textContent = 'Đang mở trang đồng bộ…'; setTimeout(post, 8000); };
+    b.onclick = () => { w = window.open(SYNC_URL, 'lgsync'); if (!w) { b.textContent = 'Cho phép pop-up rồi bấm lại'; return; } b.textContent = 'Đang mở trang đồng bộ…'; setTimeout(post, 8000); };
     document.body.appendChild(b);
   });
 }
-
-async function step(name, fn, out) { try { out[name] = await fn(); L(name + ' ok ' + (Array.isArray(out[name]) ? out[name].length : '')); } catch (e) { out.err = out.err || {}; out.err[name] = String(e.message || e).slice(0, 200); L(name + ' FAIL ' + e.message); } clear(); }
-
 window.LGW = {
-  log,
-  async run({ adsFrom = '2026-09-01', only } = {}) {
-    if (!/partners\.wayfair\.com/.test(location.host)) throw new Error('Run on partners.wayfair.com');
-    const out = { v: 1, src: 'wayfair', at: Math.floor(Date.now() / 1000) };
-    const want = n => !only || only.includes(n);
-    if (want('inv')) await step('inv', inventory, out);
-    if (want('prod')) await step('prod', products, out);
-    if (want('inb')) await step('inb', inbound, out);
-    if (want('orders')) await step('orders', orders, out);
-    if (want('ads')) await step('ads', () => ads(adsFrom), out);
-    window.LGW.out = out;
-    return JSON.stringify({ size: JSON.stringify(out).length, inv: (out.inv || []).length, prod: (out.prod || []).length, inb: (out.inb || []).length, orders: (out.orders || []).length, ads: out.ads ? out.ads.daily.length : 0, err: out.err || null });
-  },
-  // after run(): call send(), then click the centred button once
-  send() { if (!this.out) throw new Error('run() first'); this.ack = sendButton(this.out); const r = document.getElementById('lg-send').getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), vw: innerWidth, vh: innerHeight }); },
-  part(i, n = 900) { const s = JSON.stringify(this.out); return s.slice(i * n, (i + 1) * n); },
-  parts(n = 900) { return Math.ceil(JSON.stringify(this.out).length / n); }
+  log, HOWTO, record, collect, grabExport,
+  saved() { const o = ls.get(OPS_KEY) || {}; return JSON.stringify(Object.fromEntries(Object.keys(HOWTO).map(k => [k, o[k] ? new Date(o[k].at).toISOString().slice(0, 16) : 'MISSING']))); },
+  get out() { return ls.get(OUT_KEY); },
+  send() { const o = ls.get(OUT_KEY); if (!o) throw new Error('collect() first'); const p = { ...o }; delete p.exportId; this.ack = sendButton(p); const r = document.getElementById('lg-send').getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), vw: innerWidth, vh: innerHeight }); },
+  status() { return window.LG_LAST_ACK ? JSON.stringify(window.LG_LAST_ACK) : 'waiting'; },
+  part(i, n = 900) { return JSON.stringify(ls.get(OUT_KEY)).slice(i * n, (i + 1) * n); }
 };
-return 'LGW ready';
+record();
+return 'LGW v2 ready · ops ' + window.LGW.saved();
 })();
