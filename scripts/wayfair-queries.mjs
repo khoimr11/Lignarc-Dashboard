@@ -32,6 +32,10 @@ const Q_CG = `query getCastleGatePurchaseOrders($limit: Int32, $hasResponse: Boo
     products { partNumber sku quantity price totalCost isCancelled }
   } }`;
 
+const Q_STATUS = `query CastleGateOrderStatuses($filters: SoCastlegateOrderListFilters) {
+  soCastlegateOrders { orderListByFilters(filters: $filters) {
+    pageInfo { totalItems totalPages }
+    nodes { aggregatorOrderId retailerOrderNumber retailerPurchaseOrderNumbers retailerName orderDate shippingDate orderStatus } } } }`;
 function csv(t) { const rows = []; let r = [], c = '', q = false; for (let i = 0; i < t.length; i++) { const ch = t[i]; if (q) { if (ch === '"') { if (t[i + 1] === '"') { c += '"'; i++; } else q = false; } else c += ch; } else if (ch === '"') q = true; else if (ch === ',') { r.push(c); c = ''; } else if (ch === '\n') { r.push(c.replace(/\r$/, '')); rows.push(r); r = []; c = ''; } else c += ch; } if (c || r.length) { r.push(c); rows.push(r); } return rows; }
 const num = v => { const n = parseFloat(String(v ?? '').replace(/[$,%\s]/g, '')); return isNaN(n) ? 0 : n; };
 
@@ -82,7 +86,18 @@ export default async function wayfair({ gql, http, tok }) {
     return res;
   });
 
-  // 3) CastleGate customer orders (both acknowledged and not yet acknowledged)
+  // 3a) order status per PO (Shipped / Allocated / Rejected …) — the PO feed itself has no status
+  const status = new Map();
+  await step('statuses', async () => {
+    for (let page = 1; page <= 40; page++) {
+      const d = await q(ORDER_API, Q_STATUS, { filters: { supplierId: String(SUPPLIER_ID), orderSource: ['SINGLE_CHANNEL'], page, pageSize: 100, orderCreationDateTimeInterval: { from: ORDERS_FROM, to: new Date(Date.now() + 864e5).toISOString() } } });
+      const L = d.soCastlegateOrders.orderListByFilters; const nodes = L.nodes || [];
+      for (const n of nodes) { const pos = Array.isArray(n.retailerPurchaseOrderNumbers) ? n.retailerPurchaseOrderNumbers : String(n.retailerPurchaseOrderNumbers || '').split(/[,\s]+/); for (const po of pos) if (po) status.set(po, { st: n.orderStatus, shipped: day(n.shippingDate), retailer: n.retailerName }); }
+      if (page >= ((L.pageInfo && L.pageInfo.totalPages) || 1)) break;
+    }
+    return [...status.keys()];
+  });
+  // 3b) CastleGate customer orders (both acknowledged and not yet acknowledged)
   await step('orders', async () => {
     const seen = new Map();
     for (const hasResponse of [false, true]) {
@@ -96,7 +111,8 @@ export default async function wayfair({ gql, http, tok }) {
           for (const p of o.products || []) {
             const qty = num(p.quantity), key = o.poNumber + '|' + p.partNumber;
             // [po, orderNo, date, status, retailer, state, country, part, sku, name, options, qty, unit wholesale, b2b, sales channel, shipped, warehouse]
-            seen.set(key, [o.poNumber, String(o.orderId || ''), day(o.poDate), p.isCancelled ? 'Cancelled' : 'Open', /^CA/i.test(o.storePrefix || '') ? 'Wayfair.ca' : 'Wayfair', o.customerState || '', o.customerCountry || '', p.partNumber, p.sku || '', '', '', qty, p.price != null ? num(p.price) : (qty ? num(p.totalCost) / qty : 0), /b2b/i.test(o.orderType || '') ? 'Yes' : 'No', o.salesChannelName || '', null, (o.warehouse && o.warehouse.name) || '']);
+            const S = status.get(o.poNumber) || {}; const label = p.isCancelled ? 'Cancelled' : S.st ? S.st.charAt(0) + S.st.slice(1).toLowerCase().replace(/_/g, ' ') : 'Open';
+            seen.set(key, [o.poNumber, String(o.orderId || ''), day(o.poDate), label, S.retailer || (/^CA/i.test(o.storePrefix || '') ? 'Wayfair.ca' : 'Wayfair'), o.customerState || '', o.customerCountry || '', p.partNumber, p.sku || '', '', '', qty, p.price != null ? num(p.price) : (qty ? num(p.totalCost) / qty : 0), /b2b/i.test(o.orderType || '') ? 'Yes' : 'No', o.salesChannelName || '', S.shipped || null, (o.warehouse && o.warehouse.name) || '']);
           }
         }
         if (L.length < 100 || newest === from) break; from = newest; await sleep(300);
@@ -104,6 +120,7 @@ export default async function wayfair({ gql, http, tok }) {
     }
     return [...seen.values()];
   });
+  delete out.statuses;
 
   // 4) Advertising: daily campaign report (V1 reports), CSV parsed by header names
   await step('ads', async () => {
