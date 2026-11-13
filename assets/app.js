@@ -80,7 +80,7 @@ function buildModel() {
   // Wayfair CastleGate orders (export rows)
   // [po, orderNo, date, status, retailer, state, country, part, sku, name, options, qty, wholesale, b2b, channel, shipped, warehouse]
   const wfo = ((D.wf && D.wf.orders) || []).map(r => {
-    const tt = /tried/i.test(r[14] || ''); const qty = +r[11] || 0, rev = (+r[12] || 0) * qty, part = r[7];
+    const tt = /tried/i.test(r[14] || '') || ((D.wf && D.wf.ttPOs) || []).includes(r[0]); const qty = +r[11] || 0, rev = (+r[12] || 0) * qty, part = r[7];
     const cogs = cogsOf(part) * qty;
     return { ch: 'wf', po: r[0], no: r[1], date: r[2], status: r[3], retailer: r[4], state: r[5], country: r[6], part, sku: r[8], name: r[9], opt: r[10], qty, price: +r[12] || 0, rev,
       b2b: /yes/i.test(r[13] || ''), salesCh: r[14] || '', tt, shipped: r[15], wh: r[16], ok: OK_STATUS(r[3]), cogs, gp: rev - cogs - rev * (DDA + COOP) };
@@ -173,7 +173,8 @@ const dayList = r => { const out = []; for (let d = r.from; d <= r.to; d = addDa
 // ---------------- CastleGate free-storage model (FIFO by received date) ----------------
 function cgModel() {
   const man = (D.wf && D.wf.inbItems) || {};
-  const inb = ((D.wf && D.wf.inb) || []).filter(p => !/cancel/i.test(p.status)).map(p => (p.items && p.items.length) ? p : { ...p, items: man[p.id] || man[p.po] || [] });
+  const recvMan = (D.wf && D.wf.inbRecv) || {};
+  const inb = ((D.wf && D.wf.inb) || []).filter(p => !/cancel/i.test(p.status)).map(p => ({ ...p, recvStart: p.recvStart || recvMan[p.id] || null, items: (p.items && p.items.length) ? p.items : (man[p.id] || man[p.po] || []) }));
   const received = inb.filter(p => p.recvStart).sort((a, b) => a.recvStart.localeCompare(b.recvStart));
   const inv = new Map(((D.wf && D.wf.inv) || []).map(r => [r[0], { part: r[0], fam: r[1], inStock: Math.max(0, r[2] || 0), avail: Math.max(0, r[3] || 0), onOrder: r[4] || 0, retail: r[5], wholesale: r[6], aged: r[7] || 0, n3m: r[8] || 0, purch: r[9], status: r[10], supply: r[11] }]));
   const t = M.today, from30 = addDays(t, -29);
