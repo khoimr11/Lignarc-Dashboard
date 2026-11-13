@@ -12,7 +12,7 @@ const log = [];
 const L = m => { log.push(new Date().toISOString().slice(11, 19) + ' ' + m); };
 
 // open a same-origin page in an iframe and record its network calls (+ request headers)
-function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = true, until } = {}) {
+function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = false, until } = {}) {
   return new Promise(res => {
     const f = document.createElement('iframe');
     f.className = 'lgh';
@@ -36,16 +36,11 @@ function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = 
           X.setRequestHeader = function (k, v) { this._h.push([k, v]); return sh.apply(this, arguments); };
           X.send = function (b) { this.addEventListener('load', () => { if (re.test(this._u) && !BAD.test(this._u)) cap.push({ url: this._u, m: this._m, body: b, h: this._h, resp: typeof this.response === 'string' ? this.response : '' }); }); return os.apply(this, arguments); };
           // never let the iframe save files to disk
-          const ac = w.HTMLAnchorElement.prototype.click;
-          w.HTMLAnchorElement.prototype.click = function () { if (/^(blob:|data:)/.test(this.href) || this.download) { cap.push({ url: 'anchor:' + this.href, m: 'A', resp: '' }); return; } return ac.apply(this, arguments); };
-          w.open = () => null;
-          // belt and braces: no blob can become a download
-          try { w.URL.createObjectURL = () => 'about:blank#lg-blocked'; } catch (e) {}
           hooked = true;
         }
       } catch (e) {}
       const done = until && hooked && until(cap, f);
-      if (!done && Date.now() - t0 < ms) setTimeout(tick, hooked ? 400 : 0);
+      if (!done && Date.now() - t0 < ms) setTimeout(tick, hooked ? 400 : 15);
       else res({ f, cap, hooked });
     };
     tick();
@@ -149,7 +144,7 @@ async function orders() {
 }
 // ---------- Advertising ----------
 async function ads(from) {
-  const { cap } = await hook('/d/advertising/campaign', { re: /media_hub/, ms: 60000, until: cap => cap.some(c => opName(c) === 'GetCampaignInsightsQuery' && /campaignLayerIds":\[\d/.test(c.body)) && cap.filter(c => opName(c) === 'GetCampaignsQuery').some(c => c.resp.length > 400) });
+  const { cap } = await hook('/d/advertising/campaign', { re: /media_hub/, ms: 60000, vis: true, until: cap => cap.some(c => opName(c) === 'GetCampaignInsightsQuery' && /campaignLayerIds":\[\d/.test(c.body)) && cap.filter(c => opName(c) === 'GetCampaignsQuery').some(c => c.resp.length > 400) });
   const camps = cap.filter(c => opName(c) === 'GetCampaignsQuery').sort((a, b) => b.resp.length - a.resp.length)[0];
   if (!camps) throw new Error('ads ops not captured: ' + cap.map(opName).join(','));
   const ins = cap.filter(c => opName(c) === 'GetCampaignInsightsQuery').find(c => /campaignLayerIds":\[\d/.test(c.body)) || find(cap, 'GetCampaignInsightsQuery');
