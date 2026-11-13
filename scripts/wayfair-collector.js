@@ -164,6 +164,28 @@ async function ads(from) {
   return { camps: C, daily, wallet: w };
 }
 
+
+// ---------- hand the payload to the sync page (needs one real click to open the window) ----------
+const SYNC_URL = 'https://khoimr11.github.io/Lignarc-Dashboard/sync.html';
+function sendButton(payload) {
+  return new Promise((resolve) => {
+    const id = Math.random().toString(36).slice(2);
+    let w = null, posted = false;
+    const b = document.createElement('button');
+    b.id = 'lg-send'; b.textContent = 'Lignarc · Gửi dữ liệu';
+    b.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;padding:22px 38px;font:600 20px -apple-system,Segoe UI,sans-serif;background:#3d312d;color:#fff;border:0;border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.35);cursor:pointer';
+    const post = () => { if (w && !posted) { posted = true; w.postMessage({ type: 'lg-data', id, payload }, 'https://khoimr11.github.io'); b.textContent = 'Đang ghi dữ liệu…'; } };
+    const onMsg = e => {
+      if (e.origin !== 'https://khoimr11.github.io' || !e.data) return;
+      if (e.data.type === 'lg-sync-ready') post();
+      if (e.data.type === 'lg-ack' && e.data.id === id) { removeEventListener('message', onMsg); b.remove(); window.LG_LAST_ACK = e.data; resolve(e.data); }
+    };
+    addEventListener('message', onMsg);
+    b.onclick = () => { w = window.open(SYNC_URL, 'lgsync'); if (!w) { b.textContent = 'Trình duyệt chặn cửa sổ — cho phép pop-up rồi bấm lại'; return; } b.textContent = 'Đang mở trang đồng bộ…'; setTimeout(post, 8000); };
+    document.body.appendChild(b);
+  });
+}
+
 async function step(name, fn, out) { try { out[name] = await fn(); L(name + ' ok ' + (Array.isArray(out[name]) ? out[name].length : '')); } catch (e) { out.err = out.err || {}; out.err[name] = String(e.message || e).slice(0, 200); L(name + ' FAIL ' + e.message); } clear(); }
 
 window.LGW = {
@@ -180,6 +202,8 @@ window.LGW = {
     window.LGW.out = out;
     return JSON.stringify({ size: JSON.stringify(out).length, inv: (out.inv || []).length, prod: (out.prod || []).length, inb: (out.inb || []).length, orders: (out.orders || []).length, ads: out.ads ? out.ads.daily.length : 0, err: out.err || null });
   },
+  // after run(): call send(), then click the centred button once
+  send() { if (!this.out) throw new Error('run() first'); this.ack = sendButton(this.out); const r = document.getElementById('lg-send').getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), vw: innerWidth, vh: innerHeight }); },
   part(i, n = 900) { const s = JSON.stringify(this.out); return s.slice(i * n, (i + 1) * n); },
   parts(n = 900) { return Math.ceil(JSON.stringify(this.out).length / n); }
 };

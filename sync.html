@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Lignarc Sync</title>
+<link rel="icon" href="assets/mark-walnut.png">
+<style>
+:root{--bg:#efebe3;--card:rgba(255,255,255,.75);--fg:#1d1a18;--fg2:#5d5752;--sep:rgba(61,49,45,.14);--brand:#3d312d;--ok:#248a3d;--bad:#d70015;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#14110f;--card:#221d1a;--fg:#f3efe9;--fg2:#b6aea5;--sep:rgba(255,255,255,.12);--brand:#eae8de;--ok:#30d158;--bad:#ff453a;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;padding:32px 16px}
+main{max-width:540px;margin:0 auto;display:grid;gap:14px}h1{font-size:24px;margin:0;letter-spacing:-.02em}.sub{color:var(--fg2);margin:-6px 0 0}
+.card{background:var(--card);border:1px solid var(--sep);border-radius:20px;padding:18px;display:grid;gap:10px;backdrop-filter:blur(20px)}
+h2{font-size:15px;margin:0}label{display:grid;gap:4px;font-size:13px;color:var(--fg2)}
+input{height:42px;border-radius:12px;border:1px solid var(--sep);background:transparent;color:var(--fg);padding:0 12px;font:inherit;width:100%}
+button{height:42px;border:0;border-radius:12px;background:var(--brand);color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg2);border:1px solid var(--sep)}
+.st{display:flex;gap:8px;align-items:center;font-size:14px}.dot{width:9px;height:9px;border-radius:50%;background:var(--bad);flex:none}.dot.on{background:var(--ok)}
+.note{font-size:12.5px;color:var(--fg2);margin:0}#log{font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;color:var(--fg2);margin:0;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+  <h1>Lignarc · Đồng bộ dữ liệu</h1>
+  <p class="sub">Trang nhận dữ liệu từ bộ thu thập (Wayfair Partner Home, Amazon) và ghi vào dashboard. Khóa và mã chỉ lưu trong trình duyệt này.</p>
+  <section class="card">
+    <div class="st"><span class="dot" id="dKey"></span><span id="sKey">Chưa có khóa dữ liệu</span></div>
+    <div class="st"><span class="dot" id="dTok"></span><span id="sTok">Chưa có mã GitHub</span></div>
+  </section>
+  <form class="card" id="fKey">
+    <h2>1. Khóa dữ liệu — đăng nhập bằng tài khoản dashboard</h2>
+    <label>Tài khoản<input id="user" autocomplete="username" required autocapitalize="none"></label>
+    <label>Mật khẩu<input id="pass" type="password" autocomplete="current-password" required></label>
+    <button>Lưu khóa</button>
+  </form>
+  <form class="card" id="fTok">
+    <h2>2. Mã truy cập GitHub</h2>
+    <p class="note">Nếu token "LF sync" đã được thêm quyền cho repo Lignarc-Dashboard thì trang tự dùng lại, không cần nhập.</p>
+    <label>Fine-grained token (repo Lignarc-Dashboard, Contents: Read and write)<input id="tok" type="password" autocomplete="off" placeholder="github_pat_…"></label>
+    <button>Kiểm tra và lưu mã</button>
+  </form>
+  <section class="card"><h2>Nhật ký</h2><pre id="log">—</pre><button class="ghost" id="forget" type="button">Xóa khóa và mã riêng của Lignarc khỏi trình duyệt này</button></section>
+</main>
+<script src="assets/merge.js"></script>
+<script>
+(() => {
+'use strict';
+const REPO = 'khoimr11/Lignarc-Dashboard', PATH = 'data/lignarc.enc.json', API = 'https://api.github.com/repos/' + REPO + '/contents/' + PATH;
+const ORIGINS = ['https://partners.wayfair.com', 'https://sellercentral.amazon.com', 'https://advertising.amazon.com'];
+const $ = s => document.querySelector(s);
+const ls = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }, del: k => { try { localStorage.removeItem(k); } catch (e) {} } };
+const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const b64e = u => { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+const te = new TextEncoder(), td = new TextDecoder();
+const log = m => { const el = $('#log'); el.textContent = (el.textContent === '—' ? '' : el.textContent + '\n') + new Date().toLocaleTimeString('vi-VN') + '  ' + m; el.scrollTop = 1e9; };
+const tok = () => ls.get('lg-gh') || ls.get('lf-gh');
+const tokH = () => ({ Authorization: 'Bearer ' + tok(), Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
+async function canWrite(t) { const r = await fetch('https://api.github.com/repos/' + REPO, { headers: { Authorization: 'Bearer ' + t, Accept: 'application/vnd.github+json' } }); if (!r.ok) return false; const j = await r.json(); return !!(j.permissions && j.permissions.push); }
+async function refresh() {
+  const k = !!ls.get('lg-dk'); $('#dKey').classList.toggle('on', k); $('#sKey').textContent = k ? 'Đã có khóa dữ liệu' : 'Chưa có khóa dữ liệu';
+  let t = false; if (tok()) { try { t = await canWrite(tok()); } catch (e) {} }
+  $('#dTok').classList.toggle('on', t); $('#sTok').textContent = t ? ('Mã GitHub ghi được vào ' + REPO + (ls.get('lg-gh') ? '' : ' (dùng chung token LF sync)')) : (tok() ? 'Token hiện có chưa có quyền ghi vào ' + REPO : 'Chưa có mã GitHub');
+  return { key: k, token: t };
+}
+async function getFile() { const r = await fetch(API + '?ref=main&t=' + Date.now(), { headers: tokH(), cache: 'no-store' }); if (!r.ok) throw new Error('GitHub đọc file lỗi ' + r.status); const j = await r.json(); return { sha: j.sha, file: JSON.parse(td.decode(b64d(j.content.replace(/\n/g, '')))) }; }
+const aes = raw => crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+async function open(file, raw) { return JSON.parse(td.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(file.iv) }, await aes(raw), b64d(file.ct)))); }
+async function seal(obj, raw, file) { const iv = crypto.getRandomValues(new Uint8Array(12)); const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aes(raw), te.encode(JSON.stringify(obj)))); return { ...file, iv: b64e(iv), ct: b64e(ct), updated: new Date().toISOString() }; }
+let queue = Promise.resolve();
+async function publish(payloads) {
+  if (!ls.get('lg-dk')) throw new Error('Thiếu khóa dữ liệu: đăng nhập ở mục 1');
+  if (!tok()) throw new Error('Thiếu mã GitHub');
+  const raw = b64d(ls.get('lg-dk'));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { sha, file } = await getFile(); const data = await open(file, raw);
+    const res = payloads.map(p => LGMERGE(data, p));
+    const out = await seal(data, raw, file); const d = new Date(Date.now() + 7 * 3600e3);
+    const r = await fetch(API, { method: 'PUT', headers: { ...tokH(), 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'data: sync ' + payloads.map(p => p.src).join('+') + ' ' + d.toISOString().slice(0, 16).replace('T', ' ') + ' GMT+7', content: b64e(te.encode(JSON.stringify(out))), sha, branch: 'main' }) });
+    if (r.status === 409 || r.status === 422) { log('Xung đột phiên bản, thử lại…'); continue; }
+    if (!r.ok) throw new Error('GitHub ghi file lỗi ' + r.status + ' ' + (await r.text()).slice(0, 160));
+    const commit = (await r.json()).commit.sha.slice(0, 7); const o = { commit, res }; log('Đã đồng bộ ' + JSON.stringify(o)); return o;
+  }
+  throw new Error('Không ghi được sau 3 lần thử');
+}
+window.LGSYNC = { ready: () => refresh().then(JSON.stringify), publish: p => publish(Array.isArray(p) ? p : [p]).then(JSON.stringify) };
+// collectors in Wayfair / Amazon tabs open this page and post their payload here
+addEventListener('message', e => {
+  if (!ORIGINS.includes(e.origin) || !e.data || e.data.type !== 'lg-data') return;
+  const src = e.source, id = e.data.id;
+  log('Nhận dữ liệu ' + (e.data.payload && e.data.payload.src) + ' từ ' + e.origin + ' (' + JSON.stringify(e.data.payload).length + ' ký tự)');
+  queue = queue.then(() => publish([e.data.payload])).then(o => src.postMessage({ type: 'lg-ack', id, ok: true, result: o }, e.origin))
+    .catch(x => { log('LỖI ' + x.message); src.postMessage({ type: 'lg-ack', id, ok: false, error: x.message }, e.origin); });
+});
+if (window.opener) { for (const o of ORIGINS) { try { window.opener.postMessage({ type: 'lg-sync-ready' }, o); } catch (e) {} } }
+$('#fKey').addEventListener('submit', async e => {
+  e.preventDefault();
+  try {
+    const f = await (await fetch(PATH + '?t=' + Date.now(), { cache: 'no-store' })).json();
+    const u = $('#user').value.trim().toLowerCase(), h = [...new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('lignarc|' + u)))].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+    const s = f.users.find(x => x.h === h); if (!s) throw 0;
+    const base = await crypto.subtle.importKey('raw', te.encode(u + '\n' + $('#pass').value), 'PBKDF2', false, ['deriveKey']);
+    const k = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: b64d(s.salt), iterations: f.iter }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const raw = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(s.iv) }, k, b64d(s.wk)));
+    await open(f, raw); ls.set('lg-dk', b64e(raw)); $('#pass').value = ''; log('Đã lưu khóa dữ liệu');
+  } catch (x) { log('Tài khoản hoặc mật khẩu không đúng'); }
+  refresh();
+});
+$('#fTok').addEventListener('submit', async e => {
+  e.preventDefault(); const t = $('#tok').value.trim(); if (!/^(github_pat_|ghp_)/.test(t)) { log('Mã phải bắt đầu bằng github_pat_'); return; }
+  try { if (!(await canWrite(t))) throw new Error('không có quyền ghi'); ls.set('lg-gh', t); $('#tok').value = ''; log('Mã GitHub hợp lệ, đã lưu'); } catch (x) { log('Mã GitHub không dùng được cho ' + REPO + ' (' + x.message + ')'); }
+  refresh();
+});
+$('#forget').addEventListener('click', () => { ls.del('lg-dk'); ls.del('lg-gh'); log('Đã xóa khóa và mã riêng của Lignarc'); refresh(); });
+refresh();
+})();
+</script>
+</body>
+</html>
