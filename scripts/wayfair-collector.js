@@ -115,8 +115,9 @@ async function orders() {
   const doc = pg.f.contentDocument;
   const waitFor = async (fn, t = 15000) => { const t0 = Date.now(); let v; while (!(v = fn()) && Date.now() - t0 < t) await sleep(300); return v; };
   const link = await waitFor(() => doc.querySelector('[data-cypress-id=cg-export-toolbar-export-all]')); if (!link) throw new Error('Export All link not found');
-  await sleep(2500); link.click();
-  const dlg = await waitFor(() => doc.querySelector('[role=dialog]')); if (!dlg) throw new Error('export dialog not found');
+  let dlg = null;
+  for (let i = 0; i < 12 && !dlg; i++) { await sleep(2000); link.click(); dlg = await waitFor(() => doc.querySelector('[role=dialog]'), 1500); }
+  if (!dlg) throw new Error('export dialog not found');
   await sleep(800);
   const radios = [...dlg.querySelectorAll('input[type=radio]')];
   const all = radios.find(r => /All Orders/i.test((r.closest('label') || r.parentElement.parentElement || {}).textContent || '')) || radios[0];
@@ -150,8 +151,9 @@ async function orders() {
 }
 // ---------- Advertising ----------
 async function ads(from) {
-  const { cap } = await hook('/d/advertising/campaign', { re: /media_hub/, ms: 30000, until: cap => cap.filter(c => opName(c) === 'GetCampaignInsightsQuery').length >= 2 && cap.filter(c => opName(c) === 'GetCampaignsQuery').some(c => c.resp.length > 400) });
+  const { cap } = await hook('/d/advertising/campaign', { re: /media_hub/, ms: 60000, until: cap => cap.some(c => opName(c) === 'GetCampaignInsightsQuery' && /campaignLayerIds":\[\d/.test(c.body)) && cap.filter(c => opName(c) === 'GetCampaignsQuery').some(c => c.resp.length > 400) });
   const camps = cap.filter(c => opName(c) === 'GetCampaignsQuery').sort((a, b) => b.resp.length - a.resp.length)[0];
+  if (!camps) throw new Error('ads ops not captured: ' + cap.map(opName).join(','));
   const ins = cap.filter(c => opName(c) === 'GetCampaignInsightsQuery').find(c => /campaignLayerIds":\[\d/.test(c.body)) || find(cap, 'GetCampaignInsightsQuery');
   const wallet = find(cap, 'GetWalletSummaryQuery');
   const gc = JSON.parse(camps.resp).data.getCampaigns || {};
