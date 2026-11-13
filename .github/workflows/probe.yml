@@ -1,0 +1,27 @@
+name: API probe (encrypted output)
+on:
+  push:
+    paths: ['.github/probe-trigger']
+permissions:
+  contents: write
+concurrency: { group: data-sync, cancel-in-progress: false }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Probe
+        env:
+          WF_CLIENT_ID: ${{ secrets.WF_CLIENT_ID }}
+          WF_CLIENT_SECRET: ${{ secrets.WF_CLIENT_SECRET }}
+        run: node scripts/api-sync.mjs --probe > probe.txt 2>&1 || true
+      - name: Encrypt and commit
+        env:
+          LG_DK: ${{ secrets.LG_DK }}
+        run: |
+          node -e "const c=require('crypto'),fs=require('fs');const k=Buffer.from(process.env.LG_DK,'base64'),iv=c.randomBytes(12),x=c.createCipheriv('aes-256-gcm',k,iv);const ct=Buffer.concat([x.update(fs.readFileSync('probe.txt')),x.final(),x.getAuthTag()]);fs.writeFileSync('data/probe.enc.json',JSON.stringify({iv:iv.toString('base64'),ct:ct.toString('base64')}))"
+          git config user.name "lignarc-sync"; git config user.email "lignarc-sync@users.noreply.github.com"
+          git add data/probe.enc.json; git commit -m "probe output (encrypted)"; git pull --rebase -q && git push
