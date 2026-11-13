@@ -33,11 +33,18 @@
 
 <!-- App -->
 <div id="app" hidden>
+  <div class="topwrap">
   <header class="topbar glass">
     <div class="brand">
       <img class="only-light" src="assets/logo-walnut.png" alt="Lignarc">
       <img class="only-dark" src="assets/logo-white.png" alt="Lignarc">
     </div>
+    <div class="top-actions">
+      <span class="updated" id="updated"></span>
+      <button class="icon-btn" id="themeBtn" title="Giao diện sáng/tối" aria-label="Giao diện sáng/tối"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
+      <button class="icon-btn" id="logoutBtn" title="Đăng xuất" aria-label="Đăng xuất"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
+    </div>
+  </header>
     <nav class="tabs" id="tabs" role="tablist" aria-label="Màn hình">
       <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg><span>Tổng quan</span></button>
       <button role="tab" data-tab="castlegate"><svg viewBox="0 0 24 24"><path d="M3 9.5 12 4l9 5.5V20H3zM7 20v-7h10v7M7 16h10"/></svg><span>CastleGate</span></button>
@@ -45,12 +52,7 @@
       <button role="tab" data-tab="ads"><svg viewBox="0 0 24 24"><path d="M4 14V10l11-5v14L4 14zm11-1h2a3 3 0 0 0 0-6h-2M7 15l1.5 5h2.5L9.5 15"/></svg><span>Quảng cáo</span></button>
       <button role="tab" data-tab="amazon"><svg viewBox="0 0 24 24"><path d="M4 15c4.5 3 11.5 3 16 0M17 14l3 1-1 3M7 11V6.5a2.5 2.5 0 0 1 5 0V11m-6 0h8"/></svg><span>Amazon</span></button>
     </nav>
-    <div class="top-actions">
-      <span class="updated" id="updated"></span>
-      <button class="icon-btn" id="themeBtn" title="Giao diện sáng/tối" aria-label="Giao diện sáng/tối"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
-      <button class="icon-btn" id="logoutBtn" title="Đăng xuất" aria-label="Đăng xuất"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
-    </div>
-  </header>
+  </div>
 
   <div class="filters" id="filters">
     <div class="seg glass" id="period" role="radiogroup" aria-label="Khoảng thời gian">
