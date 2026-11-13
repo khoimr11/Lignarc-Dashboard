@@ -62,16 +62,16 @@ const S = { tab: 'overview', period: '30', channel: 'all', incTT: false, kpiAll:
 
 // ---------------- model ----------------
 const OK_STATUS = s => !/cancel|reject|void/i.test(s || '');
-const CAT_RULES = [[/tv stand|media console|entertainment/i, 'TV Stand'], [/nightstand|bedside/i, 'Nightstand'], [/floating|wall[- ]mounted|wall shelf/i, 'Floating Shelf'], [/cart/i, 'Utility Cart'], [/console|sideboard|buffet|credenza/i, 'Console'], [/bed/i, 'Bed'], [/shelf|bookcase|étagère|etagere/i, 'Shelving']];
+const CAT_RULES = [[/cart/i, 'Utility Cart'], [/wall[- ]mounted|floating/i, 'Wall-Mounted Vanity'], [/double/i, 'Double Vanity'], [/vanity/i, 'Single Vanity'], [/nightstand|bedside/i, 'Nightstand'], [/bed\b/i, 'Bed']];
 function buildModel() {
   const P = D.products || {};
   // enrich product master from Wayfair (inventory API names/options and order export rows)
   const enrich = (part, name, opt) => { if (!part) return; const p = P[part] = P[part] || { col: 'Khác', size: '—', color: '—', cat: '—' };
     if (name && !p.name) p.name = name;
     const c = String(opt || '').match(/Colou?r[^:]*:\s*([^,;]+)/i); if (c && (!p.color || p.color === '—')) p.color = c[1].trim();
-    if ((!p.cat || p.cat === '—') && name) { const r = CAT_RULES.find(([re]) => re.test(name)); if (r) p.cat = r[1]; }
-    if ((!p.col || p.col === 'Khác') && name) { const m = name.match(/\b(Calix|Zena|Caroline|Vestra|Kathryn|Vivian)\b/i); if (m) p.col = ({ kathryn: 'Calix', vivian: 'Zena' })[m[1].toLowerCase()] || m[1][0].toUpperCase() + m[1].slice(1).toLowerCase(); }
-    if ((!p.size || p.size === '—' || p.size === '?') && name) { const z = name.match(/(\d{2})\s*(?:''|"|”|in\b|inch)/i); if (z) p.size = z[1] + '"'; } };
+    if (name) { const r = CAT_RULES.find(([re]) => re.test(name)); if (r) p.cat = r[1]; }
+    if (name) { const m = name.match(/\b(Calix|Zena|Caroline|Vestra|Kathryn|Vivian)\b/i); if (m) p.col = ({ kathryn: 'Calix', vivian: 'Zena' })[m[1].toLowerCase()] || m[1][0].toUpperCase() + m[1].slice(1).toLowerCase(); }
+    if (name) { const z = name.match(/(\d{2})\s*(?:''|"|”|in\b|inch)/i); if (z) p.size = z[1] + '"'; } };
   for (const r of (D.wf && D.wf.inv) || []) enrich(r[0], r[12], r[13]);
   for (const r of (D.wf && D.wf.orders) || []) enrich(r[7], r[9], r[10]);
   const famOf = part => (P[part] && P[part].fam) || null;

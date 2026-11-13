@@ -90,7 +90,7 @@ export default async function wayfair({ gql, http, tok }) {
   const status = new Map();
   await step('statuses', async () => {
     for (let page = 1; page <= 40; page++) {
-      const d = await q(ORDER_API, Q_STATUS, { filters: { supplierId: String(SUPPLIER_ID), orderSource: ['SINGLE_CHANNEL'], page, pageSize: 100, orderCreationDateTimeInterval: { from: ORDERS_FROM, to: new Date(Date.now() + 864e5).toISOString() } } });
+      const d = await q(ORDER_API, Q_STATUS, { filters: { includePendingOrders: true, supplierId: String(SUPPLIER_ID), orderSource: ['SINGLE_CHANNEL'], page, pageSize: 100, orderCreationDateTimeInterval: { from: ORDERS_FROM, to: new Date(Date.now() + 864e5).toISOString() } } });
       const L = d.soCastlegateOrders.orderListByFilters; const nodes = L.nodes || [];
       for (const n of nodes) { const pos = Array.isArray(n.retailerPurchaseOrderNumbers) ? n.retailerPurchaseOrderNumbers : String(n.retailerPurchaseOrderNumbers || '').split(/[,\s]+/); for (const po of pos) if (po) status.set(po, { st: n.orderStatus, shipped: day(n.shippingDate), retailer: n.retailerName }); }
       if (page >= ((L.pageInfo && L.pageInfo.totalPages) || 1)) break;
