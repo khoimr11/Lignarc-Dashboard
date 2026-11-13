@@ -4,8 +4,9 @@
  * exact requests the pages make (LGW.record(), stored in this browser's localStorage) and replays them
  * later with wider variables. Nothing is downloaded to disk; customer names/addresses are dropped.
  *
- * Daily run (any partners.wayfair.com page):
- *   await LGW.collect()            -> inventory, catalogue, inbound POs, ads; queues the orders export
+ * Daily run:
+ *   on LGW.INB_PAGE (an inbound order detail page):  await LGW.inbound()   -> CastleGate inbound POs
+ *   on any partners.wayfair.com page: await LGW.collect()   -> inventory, catalogue, ads; queues the orders export
  *   go to /d/download-center, load script again, then:
  *   await LGW.grabExport()         -> reads the queued CastleGate orders CSV in-page
  *   LGW.send()  + click the centred button once  -> hands everything to sync.html
@@ -21,13 +22,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = []; const L = m => { log.push(new Date().toISOString().slice(11, 19) + ' ' + m); };
 const opName = b => (String(b || '').match(/operationName"\s*:\s*"(\w+)/) || String(b || '').match(/(?:query|mutation)\s+(\w+)/) || [])[1];
 const hdrList = h => (h instanceof Headers ? [...h.entries()] : Array.isArray(h) ? h : Object.entries(h || {})).filter(([k]) => !/content-length|x-parent-txid/i.test(k));
-const WANT = /GetOverviewViewUIQuery|fullAndPendingProductSearchV2|OrderListData|OrderDetailsData|TriggerCgOrderExport|GetCampaignsQuery|GetCampaignInsightsQuery|GetWalletSummaryQuery/;
+const WANT = /GetOverviewViewUIQuery|fullAndPendingProductSearchV2|TriggerCgOrderExport|GetCampaignsQuery|GetCampaignInsightsQuery|GetWalletSummaryQuery/;
 const HOWTO = {
   GetOverviewViewUIQuery: '/d/inventory/overview → click a column header (e.g. In Stock) to sort',
   fullAndPendingProductSearchV2: '/d/products/product-management/lists/performance → click a column header to sort',
-  OrderListData: '/d/manage-inbound-orders → change Rows per Page',
-  OrderDetailsData: '/d/manage-inbound-orders → click an inbound order ID (same tab)',
-  TriggerCgOrderExport: '/d/orders/castlegate/sc → Export All → Export (queues a CSV in Download Center)',
+    TriggerCgOrderExport: '/d/orders/castlegate/sc → Export All → Export (queues a CSV in Download Center)',
   GetCampaignsQuery: '/d/advertising/campaign → change Date Range',
   GetCampaignInsightsQuery: '/d/advertising/campaign → change Date Range',
   GetWalletSummaryQuery: '/d/advertising/campaign (fires on load; optional)'
@@ -72,13 +71,20 @@ async function products() {
   const arr = Object.values(d[k]).find(Array.isArray) || [];
   return arr.map(x => { const p = x.part || {}; return [p.partNumber, x.bestSku, x.revenue, x.unitsSold, x.skuImpressions, x.uniqueVisits, x.conversionRate, x.reviewsCount && x.reviewsCount.value, x.launchDate, x.productStatus && x.productStatus.displayText]; });
 }
+// Inbound POs: run on any inbound order detail page (its Apollo client holds both registered queries)
+const INB_PAGE = '/d/manage-inbound-orders/order/Q2dmT3JkZXI6NTA1MjMz';
 async function inbound() {
-  const d = await replay('OrderListData', v => { v.paginate = { limit: 100, offset: 0 }; if (v.filter) { delete v.filter.statuses; delete v.filter.status; } return v; });
+  const ac = window.__APOLLO_CLIENT__; const docs = {};
+  if (ac) for (const q of ac.queryManager.queries.values()) if (q.document && q.document.definitions[0].name) docs[q.document.definitions[0].name.value] = q;
+  if (!docs.OrderListData || !docs.OrderDetailsData) throw new Error('open ' + INB_PAGE + ' (an inbound order detail page) and run LGW.inbound() there');
+  const q = (name, vars) => ac.query({ query: docs[name].document, variables: vars, fetchPolicy: 'network-only' }).then(r => r.data);
+  const lv = JSON.parse(JSON.stringify(docs.OrderListData.observableQuery.variables || {})); lv.paginate = { limit: 100, offset: 0 }; lv.filter = {};
+  const d = await q('OrderListData', lv);
   const root = Object.values(d).find(x => x && typeof x === 'object'); const nodes = (root && (root.nodes || (root.edges || []).map(e => e.node))) || [];
   const out = [];
   for (const n of nodes) {
     if (/CANCEL/i.test(n.status || '')) { out.push({ id: n.displayId, status: n.status, created: day(n.originalCreatedDate), items: [] }); continue; }
-    const io = (await replay('OrderDetailsData', { id: n.id })).inboundOrder; const ms = {};
+    const io = (await q('OrderDetailsData', { id: n.id })).inboundOrder; const ms = {};
     for (const s of io.shipments || []) for (const t of s.timeline || []) for (const a of t.attributes || []) ms[(t.descriptor || '') + ':' + a.type] = a.value;
     const items = new Map();
     for (const li of (io.orderLineItems && io.orderLineItems.nodes) || []) items.set(li.partNumber, [li.partNumber, li.plannedQuantity || 0, 0, 0]);
@@ -136,7 +142,8 @@ async function collect({ adsFrom = '2026-09-01' } = {}) {
   if (!/partners\.wayfair\.com/.test(location.host)) throw new Error('Run on partners.wayfair.com');
   const out = { v: 2, src: 'wayfair', at: Math.floor(Date.now() / 1000) }, err = {};
   const step = async (k, fn) => { try { out[k] = await fn(); L(k + ' ok'); } catch (e) { err[k] = String(e.message || e).slice(0, 240); L(k + ' FAIL ' + err[k]); } };
-  await step('inv', inventory); await step('prod', products); await step('inb', inbound); await step('ads', () => ads(adsFrom));
+  const prev = ls.get(OUT_KEY) || {}; if (prev.inb) out.inb = prev.inb;
+  await step('inv', inventory); await step('prod', products); await step('ads', () => ads(adsFrom));
   await step('exportId', queueExport);
   if (Object.keys(err).length) out.err = err;
   ls.set(OUT_KEY, out);
@@ -157,13 +164,13 @@ function sendButton(payload) {
   });
 }
 window.LGW = {
-  log, HOWTO, record, collect, grabExport,
+  log, HOWTO, record, collect, grabExport, INB_PAGE,
+  async inbound() { const o = ls.get(OUT_KEY) || {}; o.inb = await inbound(); ls.set(OUT_KEY, o); return JSON.stringify({ inb: o.inb.length, open: o.inb.filter(x => !/CANCEL/i.test(x.status)).map(x => x.id + ':' + x.status) }); },
   saved() { const o = ls.get(OPS_KEY) || {}; return JSON.stringify(Object.fromEntries(Object.keys(HOWTO).map(k => [k, o[k] ? new Date(o[k].at).toISOString().slice(0, 16) : 'MISSING']))); },
   get out() { return ls.get(OUT_KEY); },
   send() { const o = ls.get(OUT_KEY); if (!o) throw new Error('collect() first'); const p = { ...o }; delete p.exportId; this.ack = sendButton(p); const r = document.getElementById('lg-send').getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), vw: innerWidth, vh: innerHeight }); },
   status() { return window.LG_LAST_ACK ? JSON.stringify(window.LG_LAST_ACK) : 'waiting'; },
   part(i, n = 900) { return JSON.stringify(ls.get(OUT_KEY)).slice(i * n, (i + 1) * n); }
 };
-record();
 return 'LGW v2 ready · ops ' + window.LGW.saved();
 })();
