@@ -32,7 +32,7 @@ const Q_CG = `query getCastleGatePurchaseOrders($limit: Int32, $hasResponse: Boo
     products { partNumber sku quantity price totalCost isCancelled }
   } }`;
 
-const Q_STATUS = `query CastleGateOrderStatuses($filters: SoCastlegateOrderListFilters) {
+const Q_STATUS = `query CastleGateOrderStatuses($filters: SoCastlegateOrderListFilters!) {
   soCastlegateOrders { orderListByFilters(filters: $filters) {
     pageInfo { totalItems totalPages }
     nodes { aggregatorOrderId retailerOrderNumber retailerPurchaseOrderNumbers retailerName orderDate shippingDate orderStatus } } } }`;
@@ -135,13 +135,17 @@ export default async function wayfair({ gql, http, tok }) {
     const fuzzy = re => head.findIndex(h => re.test(h));
     const c = { date: col('date', 'day'), id: col('campaign id', 'campaignid'), name: col('campaign name', 'campaign'), impr: fuzzy(/impression/), clicks: fuzzy(/^clicks?$/), spend: fuzzy(/spend|cost/), units: fuzzy(/units/), sales: fuzzy(/(retail )?(revenue|sales)/), orders: fuzzy(/orders/) };
     if (c.date < 0 || c.spend < 0) throw new Error('unexpected ads report columns: ' + head.join('|'));
-    const camps = new Map(), daily = [];
+    const camps = new Map(), agg = new Map();
     for (const r of R.slice(1)) {
       if (r.length < 3) continue; const cid = c.id >= 0 ? r[c.id] : (r[c.name] || 'campaign');
       const dt = String(r[c.date]).match(/(\d{4})-(\d{2})-(\d{2})/) ? r[c.date].slice(0, 10) : (() => { const m = String(r[c.date]).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : r[c.date]; })();
-      if (!camps.has(cid)) camps.set(cid, [cid, c.name >= 0 ? r[c.name] : cid, 1, null, null, null, null, null]);
-      daily.push([cid, dt, num(r[c.impr]), num(r[c.clicks]), num(r[c.spend]), c.units >= 0 ? num(r[c.units]) : 0, c.sales >= 0 ? num(r[c.sales]) : 0, c.orders >= 0 ? num(r[c.orders]) : 0]);
+      const ci = n => head.indexOf(n);
+      if (!camps.has(cid)) camps.set(cid, [cid, c.name >= 0 ? r[c.name] : cid, ci('campaign_status') >= 0 ? r[ci('campaign_status')] : 1, ci('campaign_start_date') >= 0 ? r[ci('campaign_start_date')] : null, null, ci('campaign_daily_cap_usd') >= 0 ? num(r[ci('campaign_daily_cap_usd')]) : null, null, ci('bidding_strategy') >= 0 ? r[ci('bidding_strategy')] : null]);
+      // the report splits each campaign-day by B2B / targeting type: add the pieces up
+      const k = cid + '|' + dt, row = agg.get(k) || [cid, dt, 0, 0, 0, 0, 0, 0];
+      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += c.units >= 0 ? num(r[c.units]) : 0; row[6] += c.sales >= 0 ? num(r[c.sales]) : 0; row[7] += c.orders >= 0 ? num(r[c.orders]) : 0; agg.set(k, row);
     }
+    const daily = [...agg.values()].map(r => r.map((v, i) => i > 1 ? Math.round(v * 100) / 100 : v));
     return { camps: [...camps.values()], daily, wallet: null, columns: head, sample: R.slice(1, 4) };
   });
 
