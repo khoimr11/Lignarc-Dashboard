@@ -39,6 +39,8 @@ function hook(path, { ms = 20000, re = /graph|media_hub|download-center/, vis = 
           const ac = w.HTMLAnchorElement.prototype.click;
           w.HTMLAnchorElement.prototype.click = function () { if (/^(blob:|data:)/.test(this.href) || this.download) { cap.push({ url: 'anchor:' + this.href, m: 'A', resp: '' }); return; } return ac.apply(this, arguments); };
           w.open = () => null;
+          // belt and braces: no blob can become a download
+          try { w.URL.createObjectURL = () => 'about:blank#lg-blocked'; } catch (e) {}
           hooked = true;
         }
       } catch (e) {}
@@ -129,21 +131,16 @@ async function orders() {
   for (let i = 0; i < 30 && !exportId; i++) { await sleep(500); const c = pg.cap.find(c => /triggerExport/.test(c.resp)); if (c) exportId = JSON.parse(c.resp).data.soCastlegateOrders.triggerExport.exportId; }
   if (!exportId) throw new Error('export not queued');
   L('export ' + exportId);
-  // get the download-center bearer by letting its page fetch one file (anchor click is neutralised)
+  // the Download Center page calls api.wayfair.io with a bearer token: borrow it, then read our file directly (nothing is clicked or saved)
+  const auth = c => hdrs(c).find(([k]) => /^authorization$/i.test(k));
+  const dc = await hook('/d/download-center', { re: /wayfair\.io|download-center/, ms: 25000, until: cap => cap.some(auth) });
+  const ac = dc.cap.find(auth); dc.f.remove();
+  if (!ac) throw new Error('download-center token not found: ' + dc.cap.map(c => c.url.split('?')[0]).join(','));
+  const AH = hdrs(ac).filter(([k]) => /^(authorization|accept|x-requested-with)$/i.test(k));
   let text = null;
-  for (let attempt = 0; attempt < 12 && !text; attempt++) {
-    await sleep(attempt ? 10000 : 6000);
-    const dc = await hook('/d/download-center', { re: /download-center|graph/, ms: 20000, until: cap => cap.some(c => /download-center\/file/.test(c.url)) || false,
-      vis: true });
-    const d2 = dc.f.contentDocument;
-    const row = [...d2.querySelectorAll('table tbody tr')].find(r => /CastleGate_SC_Export/.test(r.textContent) && /Complete/.test(r.textContent));
-    if (!row) { dc.f.remove(); continue; }
-    (row.querySelector('button,a') || {}).click && row.querySelector('button,a').click();
-    for (let i = 0; i < 20 && !dc.cap.some(c => /download-center\/file/.test(c.url)); i++) await sleep(500);
-    const fc = dc.cap.find(c => /download-center\/file/.test(c.url));
-    dc.f.remove(); if (!fc) continue;
-    const r = await fetch(fc.url.replace(/file\/[^/?]+/, 'file/' + exportId), { headers: hdrs(fc), credentials: 'include' });
-    if (r.ok) { const t = await r.text(); if (/^Supplier,/.test(t)) text = t; }
+  for (let attempt = 0; attempt < 18 && !text; attempt++) {
+    await sleep(attempt ? 8000 : 4000);
+    try { const r = await fetch('https://api.wayfair.io/download-center/file/' + exportId, { headers: AH }); if (r.ok) { const t = await r.text(); if (/^﻿?Supplier,/.test(t)) text = t.replace(/^﻿/, ''); } } catch (e) {}
   }
   if (!text) throw new Error('export file not ready');
   const R = csv(text.trim()); const H = R[0]; const ix = n => H.indexOf(n);
