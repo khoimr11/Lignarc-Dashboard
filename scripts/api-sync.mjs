@@ -102,6 +102,7 @@ async function wayfair() {
       const T = ((j.data && j.data.__schema.types) || []).filter(t => /^(SoCastlegate|InboundOrder|CastlegatePurchase|SupplierCastlegate)/i.test(t.name));
       for (const t of T) console.log('TYPE', t.name, t.kind, (t.fields || []).map(f => f.name + (f.args && f.args.length ? '(' + f.args.map(a => a.name).join(',') + ')' : '') + ':' + (f.type.name || (f.type.ofType && (f.type.ofType.name || (f.type.ofType.ofType && (f.type.ofType.ofType.name || (f.type.ofType.ofType.ofType && f.type.ofType.ofType.ofType.name))))))).join(', '), (t.enumValues || []).map(e => e.name).join('|'), (t.inputFields || []).map(f => f.name + ':' + (f.type.name || (f.type.ofType && f.type.ofType.name))).join(', '));
     } catch (e) { console.log('types ERR', e.message.slice(0, 200)); }
+    if (fs.existsSync('scripts/wf-probe.mjs')) { try { await (await import('./wf-probe.mjs')).default({ gql, http, tok }); } catch (e) { console.log('wf-probe ERR', e.message); } }
     return out;
   }
   const Q = fs.existsSync('scripts/wayfair-queries.mjs') ? (await import('./wayfair-queries.mjs')).default : null;
