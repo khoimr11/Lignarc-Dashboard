@@ -16,6 +16,9 @@
  */
 (() => {
 'use strict';
+// A native alert/confirm left open freezes the tab for automation: record them instead of showing them.
+window.LGW_DIALOGS = window.LGW_DIALOGS || [];
+if (!window.__lgwNoDialogs) { window.__lgwNoDialogs = true; window.alert = m => { window.LGW_DIALOGS.push('alert: ' + m); }; window.confirm = m => { window.LGW_DIALOGS.push('confirm: ' + m); return false; }; window.prompt = m => { window.LGW_DIALOGS.push('prompt: ' + m); return null; }; }
 const OPS_KEY = 'lgw-ops', OUT_KEY = 'lgw-out';
 const ls = { get: k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -169,6 +172,7 @@ window.LGW = {
   saved() { const o = ls.get(OPS_KEY) || {}; return JSON.stringify(Object.fromEntries(Object.keys(HOWTO).map(k => [k, o[k] ? new Date(o[k].at).toISOString().slice(0, 16) : 'MISSING']))); },
   get out() { return ls.get(OUT_KEY); },
   send() { const o = ls.get(OUT_KEY); if (!o) throw new Error('collect() first'); const p = { ...o }; delete p.exportId; this.ack = sendButton(p); const r = document.getElementById('lg-send').getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), vw: innerWidth, vh: innerHeight }); },
+  dialogs() { return JSON.stringify(window.LGW_DIALOGS); },
   status() { return window.LG_LAST_ACK ? JSON.stringify(window.LG_LAST_ACK) : 'waiting'; },
   part(i, n = 900) { return JSON.stringify(ls.get(OUT_KEY)).slice(i * n, (i + 1) * n); }
 };
