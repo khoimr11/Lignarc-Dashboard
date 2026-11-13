@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -11,7 +11,7 @@
 <title>Lignarc · Commerce Dashboard</title>
 <link rel="icon" href="assets/mark-walnut.png">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-<link rel="stylesheet" href="assets/styles.css?v=1">
+<link rel="stylesheet" href="assets/styles.css?v=2">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
@@ -22,12 +22,12 @@
     <img class="logo only-light" src="assets/logo-walnut.png" alt="Lignarc">
     <img class="logo only-dark" src="assets/logo-white.png" alt="Lignarc">
     <p class="login-sub">Commerce Dashboard · Wayfair CastleGate &amp; Amazon</p>
-    <label class="field"><span>Tài khoản</span><input id="user" name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
-    <label class="field"><span>Mật khẩu</span><input id="pass" name="password" type="password" autocomplete="current-password" required></label>
-    <label class="remember"><input type="checkbox" id="remember" checked> Ghi nhớ trên thiết bị này</label>
-    <button class="btn-primary" id="loginBtn" type="submit">Đăng nhập</button>
+    <label class="field"><span>Username</span><input id="user" name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
+    <label class="field"><span>Password</span><input id="pass" name="password" type="password" autocomplete="current-password" required></label>
+    <label class="remember"><input type="checkbox" id="remember" checked> Remember me on this device</label>
+    <button class="btn-primary" id="loginBtn" type="submit">Sign in</button>
     <p class="login-err" id="loginErr" role="alert"></p>
-    <p class="login-foot">Dữ liệu được mã hóa AES-256. Chỉ giải mã trên trình duyệt sau khi đăng nhập.</p>
+    <p class="login-foot">Data is AES-256 encrypted and only decrypted in your browser after sign-in.</p>
   </form>
 </section>
 
@@ -41,34 +41,30 @@
     </div>
     <div class="top-actions">
       <span class="updated" id="updated"></span>
-      <button class="icon-btn" id="themeBtn" title="Giao diện sáng/tối" aria-label="Giao diện sáng/tối"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
-      <button class="icon-btn" id="logoutBtn" title="Đăng xuất" aria-label="Đăng xuất"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
+      <button class="icon-btn filter-btn" id="filterBtn" aria-label="Filters" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg><b id="filterCount"></b></button>
+      <button class="icon-btn" id="themeBtn" title="Light / dark" aria-label="Light / dark"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
+      <button class="icon-btn" id="logoutBtn" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
     </div>
   </header>
-    <nav class="tabs" id="tabs" role="tablist" aria-label="Màn hình">
-      <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg><span>Tổng quan</span></button>
-      <button role="tab" data-tab="castlegate"><svg viewBox="0 0 24 24"><path d="M3 9.5 12 4l9 5.5V20H3zM7 20v-7h10v7M7 16h10"/></svg><span>CastleGate</span></button>
-      <button role="tab" data-tab="sales"><svg viewBox="0 0 24 24"><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg><span>Bán hàng</span></button>
-      <button role="tab" data-tab="ads"><svg viewBox="0 0 24 24"><path d="M4 14V10l11-5v14L4 14zm11-1h2a3 3 0 0 0 0-6h-2M7 15l1.5 5h2.5L9.5 15"/></svg><span>Quảng cáo</span></button>
-      <button role="tab" data-tab="amazon"><svg viewBox="0 0 24 24"><path d="M4 15c4.5 3 11.5 3 16 0M17 14l3 1-1 3M7 11V6.5a2.5 2.5 0 0 1 5 0V11m-6 0h8"/></svg><span>Amazon</span></button>
-    </nav>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Views">
+    <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg><span>Overview</span></button>
+    <button role="tab" data-tab="sales"><svg viewBox="0 0 24 24"><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg><span>Sales</span></button>
+    <button role="tab" data-tab="profit"><svg viewBox="0 0 24 24"><path d="M12 3v18M16.5 7.5c0-1.7-2-3-4.5-3s-4.5 1.3-4.5 3 2 2.6 4.5 3 4.5 1.4 4.5 3.2-2 3-4.5 3-4.5-1.3-4.5-3"/></svg><span>Profit</span></button>
+    <button role="tab" data-tab="customers"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21zm0-9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/></svg><span>Customers</span></button>
+    <button role="tab" data-tab="ads"><svg viewBox="0 0 24 24"><path d="M4 14V10l11-5v14L4 14zm11-1h2a3 3 0 0 0 0-6h-2M7 15l1.5 5h2.5L9.5 15"/></svg><span>Ads</span></button>
+    <button role="tab" data-tab="inventory"><svg viewBox="0 0 24 24"><path d="M3 9.5 12 4l9 5.5V20H3zM7 20v-7h10v7M7 16h10"/></svg><span class="l">Inventory &amp; POs</span><span class="s">Inventory</span></button>
+  </nav>
   </div>
 
-  <div class="filters" id="filters">
-    <div class="seg glass" id="period" role="radiogroup" aria-label="Khoảng thời gian">
-      <button data-p="7">7 ngày</button><button data-p="30" aria-pressed="true">30 ngày</button><button data-p="mtd">Tháng này</button><button data-p="qtd">Quý này</button><button data-p="all">Toàn bộ</button>
-    </div>
-    <div class="seg glass" id="channel" role="radiogroup" aria-label="Kênh">
-      <button data-c="all" aria-pressed="true">Tất cả kênh</button><button data-c="wf">Wayfair</button><button data-c="amz">Amazon</button>
-    </div>
-    <label class="tt-toggle glass"><input type="checkbox" id="incTT"> <span>Gồm đơn Tried &amp; True</span></label>
+  <div class="shell">
+    <aside class="sidebar glass" id="sidebar" aria-label="Filters"></aside>
+    <main id="view" class="view"></main>
   </div>
-
-  <main id="view" class="view"></main>
-  <footer class="foot">Nguồn: Wayfair Partner Home (CastleGate Orders, Inventory, Inbound, Advertising) · Amazon Seller Central &amp; Amazon Ads · KPI: Cashflow 26+27 · Giá vốn: PO 1st Shipment</footer>
+  <div class="scrim" id="scrim"></div>
+  <footer class="foot">Sources: Wayfair Developer APIs (CastleGate orders, inventory, inbound, advertising) · Amazon SP-API &amp; Ads API (pending approval) · Targets: Cashflow 26+27 · Landed cost: PO shipment cost sheets</footer>
 </div>
 
 <div id="tip" class="tip" role="tooltip" hidden></div>
-<script src="assets/app.js?v=1"></script>
+<script src="assets/app.js?v=2"></script>
 </body>
 </html>

@@ -1,14 +1,13 @@
 /* Lignarc Commerce Dashboard
  * Static app: decrypts data/lignarc.enc.json in the browser after login, then renders.
- * Revenue = Wayfair wholesale price × qty (what Wayfair pays Lignarc) — same basis as the KPI "Rev" line.
+ * Revenue = Wayfair base cost × units (before promotion) — same basis as the KPI "Rev" line; Net Revenue = wholesale price paid.
+ * COGS = landed cost per PO shipment, consumed FIFO. Profit = Net Revenue − platform fee − DDA − COGS − returns − CastleGate fees − ads.
  */
 (() => {
 'use strict';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const DATA_URL = 'data/lignarc.enc.json';
-const FREE_DAYS = 90;
-const DDA = 0.025, COOP = 0.10;            // per COGS sheet: DDA 2.5% + Co-op 10% of wholesale revenue
 const store = { get: k => { try { return localStorage.getItem(k) || sessionStorage.getItem(k); } catch (e) { return null; } },
   set: (k, v, persist) => { try { (persist ? localStorage : sessionStorage).setItem(k, v); } catch (e) {} },
   del: k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch (e) {} } };
@@ -27,7 +26,7 @@ async function openWith(file, raw) {
   const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
   return JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(file.iv) }, k, b64d(file.ct))));
 }
-async function fetchFile() { const r = await fetch(DATA_URL + '?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) throw new Error('Không tải được dữ liệu (' + r.status + ')'); return r.json(); }
+async function fetchFile() { const r = await fetch(DATA_URL + '?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) throw new Error('Could not load data (' + r.status + ')'); return r.json(); }
 async function login(user, pass) {
   const file = await fetchFile(), h = await hint(user);
   const u = (file.users || []).find(x => x.h === h); if (!u) throw new Error('bad');
@@ -40,413 +39,678 @@ async function login(user, pass) {
 const nf0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const usd = (v, d = 0) => (v < 0 ? '−$' : '$') + new Intl.NumberFormat('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }).format(Math.abs(v || 0));
-const usdK = v => Math.abs(v) >= 1e6 ? '$' + nf1.format(v / 1e6) + 'M' : Math.abs(v) >= 1e4 ? '$' + nf1.format(v / 1e3) + 'k' : usd(v);
+const usdK = v => Math.abs(v) >= 1e6 ? (v < 0 ? '−' : '') + '$' + nf1.format(Math.abs(v) / 1e6) + 'M' : Math.abs(v) >= 1e4 ? (v < 0 ? '−' : '') + '$' + nf1.format(Math.abs(v) / 1e3) + 'k' : usd(v);
 const pct = (v, d = 0) => v == null || !isFinite(v) ? '—' : (v * 100).toFixed(d) + '%';
 const n0 = v => nf0.format(v || 0);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const VNM = ['Th1', 'Th2', 'Th3', 'Th4', 'Th5', 'Th6', 'Th7', 'Th8', 'Th9', 'Th10', 'Th11', 'Th12'];
-const dShort = s => { const [y, m, d] = s.split('-'); return +d + '/' + +m; };
-const dLong = s => { if (!s) return '—'; const [y, m, d] = s.slice(0, 10).split('-'); return `${d}/${m}/${y}`; };
-const mLabel = ym => { const [y, m] = ym.split('-'); return VNM[+m - 1] + '/' + y.slice(2); };
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const dShort = s => { const [, m, d] = s.split('-'); return MON[+m - 1] + ' ' + +d; };
+const dLong = s => { if (!s) return '—'; const [y, m, d] = s.slice(0, 10).split('-'); return `${MON[+m - 1]} ${+d}, ${y}`; };
+const mLabel = ym => { const [y, m] = ym.split('-'); return MON[+m - 1] + ' ' + y.slice(2); };
 const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const diffDays = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 864e5);
+const daysIn = ym => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m, 0)).getUTCDate(); };
 const sum = (a, f = x => x) => a.reduce((s, x) => s + (+f(x) || 0), 0);
 const groupBy = (a, f) => { const m = new Map(); for (const x of a) { const k = f(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); } return m; };
 const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const SER = () => [cssv('--s1'), cssv('--s2'), cssv('--s3'), cssv('--s4'), cssv('--s5')];
+const sizeLbl = s => s ? s + '"' : '—';
+const ET_FMT = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23', weekday: 'short' });
+const etHourDow = iso => { const p = Object.fromEntries(ET_FMT.formatToParts(new Date(iso)).map(x => [x.type, x.value])); return { h: (+p.hour) % 24, dow: DOW.indexOf(p.weekday) }; };
+const tipRows = (title, rows) => `<b>${esc(title)}</b>` + rows.map(([k, v, c]) => `<div><span>${c ? `<i style="background:${c}"></i>` : ''}${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
+
+// US states: name, Census region, coast
+const STATES = { AL: ['Alabama', 'South', 'Inland (Gulf)'], AK: ['Alaska', 'West', 'West Coast'], AZ: ['Arizona', 'West', 'Inland'], AR: ['Arkansas', 'South', 'Inland'], CA: ['California', 'West', 'West Coast'], CO: ['Colorado', 'West', 'Inland'], CT: ['Connecticut', 'Northeast', 'East Coast'], DE: ['Delaware', 'South', 'East Coast'], DC: ['District of Columbia', 'South', 'East Coast'], FL: ['Florida', 'South', 'East Coast'], GA: ['Georgia', 'South', 'East Coast'], HI: ['Hawaii', 'West', 'West Coast'], ID: ['Idaho', 'West', 'Inland'], IL: ['Illinois', 'Midwest', 'Inland'], IN: ['Indiana', 'Midwest', 'Inland'], IA: ['Iowa', 'Midwest', 'Inland'], KS: ['Kansas', 'Midwest', 'Inland'], KY: ['Kentucky', 'South', 'Inland'], LA: ['Louisiana', 'South', 'Inland (Gulf)'], ME: ['Maine', 'Northeast', 'East Coast'], MD: ['Maryland', 'South', 'East Coast'], MA: ['Massachusetts', 'Northeast', 'East Coast'], MI: ['Michigan', 'Midwest', 'Inland'], MN: ['Minnesota', 'Midwest', 'Inland'], MS: ['Mississippi', 'South', 'Inland (Gulf)'], MO: ['Missouri', 'Midwest', 'Inland'], MT: ['Montana', 'West', 'Inland'], NE: ['Nebraska', 'Midwest', 'Inland'], NV: ['Nevada', 'West', 'Inland'], NH: ['New Hampshire', 'Northeast', 'East Coast'], NJ: ['New Jersey', 'Northeast', 'East Coast'], NM: ['New Mexico', 'West', 'Inland'], NY: ['New York', 'Northeast', 'East Coast'], NC: ['North Carolina', 'South', 'East Coast'], ND: ['North Dakota', 'Midwest', 'Inland'], OH: ['Ohio', 'Midwest', 'Inland'], OK: ['Oklahoma', 'South', 'Inland'], OR: ['Oregon', 'West', 'West Coast'], PA: ['Pennsylvania', 'Northeast', 'Inland'], RI: ['Rhode Island', 'Northeast', 'East Coast'], SC: ['South Carolina', 'South', 'East Coast'], SD: ['South Dakota', 'Midwest', 'Inland'], TN: ['Tennessee', 'South', 'Inland'], TX: ['Texas', 'South', 'Inland (Gulf)'], UT: ['Utah', 'West', 'Inland'], VT: ['Vermont', 'Northeast', 'Inland'], VA: ['Virginia', 'South', 'East Coast'], WA: ['Washington', 'West', 'West Coast'], WV: ['West Virginia', 'South', 'Inland'], WI: ['Wisconsin', 'Midwest', 'Inland'], WY: ['Wyoming', 'West', 'Inland'] };
+const CA_PROV = { AB: 'Alberta', BC: 'British Columbia', MB: 'Manitoba', NB: 'New Brunswick', NL: 'Newfoundland and Labrador', NS: 'Nova Scotia', ON: 'Ontario', PE: 'Prince Edward Island', QC: 'Quebec', SK: 'Saskatchewan' };
 
 // ---------------- state ----------------
-let D = null;            // decrypted data
-let M = null;            // derived model
-const S = { tab: 'overview', period: '30', channel: 'all', incTT: false, kpiAll: false, invAll: false };
+let D = null, M = null, US = null;
+const FILTER_KEYS = [['col', 'Collection'], ['cat', 'Category'], ['type', 'Product type'], ['size', 'Size'], ['color', 'Color'], ['sku', 'SKU'], ['po', 'PO / Shipment']];
+const S = { tab: 'overview', preset: '30d', from: null, to: null, compare: true, platform: 'all', incTT: false, f: Object.fromEntries(FILTER_KEYS.map(([k]) => [k, new Set()])), sort: {}, kpiAll: false, hideZero: true, open: {} };
 
 // ---------------- model ----------------
 const OK_STATUS = s => !/cancel|reject|void/i.test(s || '');
-const CAT_RULES = [[/cart/i, 'Utility Cart'], [/wall[- ]mounted|floating/i, 'Wall-Mounted Vanity'], [/double/i, 'Double Vanity'], [/vanity/i, 'Single Vanity'], [/nightstand|bedside/i, 'Nightstand'], [/bed\b/i, 'Bed']];
-function buildModel() {
+function build() {
   const P = D.products || {};
-  // enrich product master from Wayfair (inventory API names/options and order export rows)
-  const enrich = (part, name, opt) => { if (!part) return; const p = P[part] = P[part] || { col: 'Khác', size: '—', color: '—', cat: '—' };
-    if (name && !p.name) p.name = name;
-    const c = String(opt || '').match(/Colou?r[^:]*:\s*([^,;]+)/i); if (c && (!p.color || p.color === '—')) p.color = c[1].trim();
-    if (name) { const r = CAT_RULES.find(([re]) => re.test(name)); if (r) p.cat = r[1]; }
-    if (name) { const m = name.match(/\b(Calix|Zena|Caroline|Vestra|Kathryn|Vivian)\b/i); if (m) p.col = ({ kathryn: 'Calix', vivian: 'Zena' })[m[1].toLowerCase()] || m[1][0].toUpperCase() + m[1].slice(1).toLowerCase(); }
-    if (name) { const z = name.match(/(\d{2})\s*(?:''|"|”|in\b|inch)/i); if (z) p.size = z[1] + '"'; } };
-  for (const r of (D.wf && D.wf.inv) || []) enrich(r[0], r[12], r[13]);
-  for (const r of (D.wf && D.wf.orders) || []) enrich(r[7], r[9], r[10]);
-  const famOf = part => (P[part] && P[part].fam) || null;
-  const prod = part => P[part] || { col: 'Khác', size: '—', color: '—', cat: 'Khác', name: part };
-  const cogsOf = part => { const p = P[part]; if (p && p.cogs) return p.cogs; const f = famOf(part); const s = Object.values(P).find(x => x.fam === f && x.cogs); return s ? s.cogs : 0; };
-  // Wayfair CastleGate orders (export rows)
-  // [po, orderNo, date, status, retailer, state, country, part, sku, name, options, qty, wholesale, b2b, channel, shipped, warehouse]
-  const SOV = (D.wf && D.wf.statusOv) || {};
-  const wfo = ((D.wf && D.wf.orders) || []).map(r0 => { const r = SOV[r0[0]] ? Object.assign([...r0], { 3: SOV[r0[0]] }) : r0;
-    const tt = /tried/i.test(r[14] || '') || ((D.wf && D.wf.ttPOs) || []).includes(r[0]); const qty = +r[11] || 0, rev = (+r[12] || 0) * qty, part = r[7];
-    const cogs = cogsOf(part) * qty;
-    return { ch: 'wf', po: r[0], no: r[1], date: r[2], status: r[3], retailer: r[4], state: r[5], country: r[6], part, sku: r[8], name: r[9], opt: r[10], qty, price: +r[12] || 0, rev,
-      b2b: /yes/i.test(r[13] || ''), salesCh: r[14] || '', tt, shipped: r[15], wh: r[16], ok: OK_STATUS(r[3]), cogs, gp: rev - cogs - rev * (DDA + COOP) };
+  const A = Object.assign({ platformFee: 0.10, dda: 0.025, returns: 0.013, castlegate: 0.015, amazonFee: 0.15 }, D.assump || {});
+  const W = D.wf || {}, inbById = new Map((W.inb || []).map(x => [x.id, x]));
+  const recvOf = po => (W.inbRecv && W.inbRecv[po.whs]) || po.recv || (inbById.get(po.whs) && (inbById.get(po.whs).recvStart || inbById.get(po.whs).gatedOut)) || null;
+  const pos = (D.pos || []).map(p => ({ ...p, recv: recvOf(p) ? String(recvOf(p)).slice(0, 10) : null, inb: inbById.get(p.whs) || null }))
+    .sort((a, b) => (a.recv || '9999').localeCompare(b.recv || '9999'));
+  // FIFO cost layers per SKU, in receiving order
+  const layers = {};
+  for (const po of pos) for (const [part, qty, fob, cogs] of po.items || []) (layers[part] = layers[part] || []).push({ po: po.id, qty, left: qty, fob, cogs, recv: po.recv });
+  const lastCost = part => { const L = layers[part]; if (L && L.length) return L[L.length - 1]; const fam = P[part] && P[part].fam; for (const k in layers) if (P[k] && P[k].fam === fam) return layers[k][layers[k].length - 1]; return { cogs: 0, fob: 0 }; };
+  const prod = part => P[part] || { col: 'Other', cat: 'Other', type: 'Other', size: null, color: null, name: part, base: 0 };
+  const SOV = W.statusOv || {}, TT = new Set(W.ttPOs || []);
+  const lines = [];
+  for (const r of W.orders || []) {
+    const status = SOV[r[0]] || r[3]; const p = prod(r[7]); const qty = +r[11] || 0, price = +r[12] || 0, base = p.base || price;
+    const ts = r[17] || null, hd = ts ? etHourDow(ts) : null;
+    lines.push({ ch: 'wf', po: r[0], date: r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
+  }
+  for (const r of (D.amz && D.amz.orders) || []) {
+    const p = prod(r[3]); const qty = +r[5] || 0, price = +r[6] || 0;
+    lines.push({ ch: 'amz', po: r[0], date: r[1], ts: null, hour: null, dow: null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: '', country: 'US', part: r[3], qty, price, base: price, b2b: false, tt: false });
+  }
+  lines.sort((a, b) => (a.ts || a.date + 'T12').localeCompare(b.ts || b.date + 'T12'));
+  // split each order line into FIFO pieces (Tried & True units ship from the same stock, so they consume layers too)
+  const pieces = [];
+  const mk = (l, q, ly) => {
+    const p = prod(l.part), rev = l.base * q, net = l.price * q;
+    const fee = l.ch === 'amz' ? net * A.amazonFee : net * A.platformFee;
+    return { ...l, qty: q, layer: ly.po, unitCogs: ly.cogs, unitFob: ly.fob, rev, net, promo: rev - net, cogs: ly.cogs * q, fob: ly.fob * q, fee, dda: l.ch === 'wf' ? net * A.dda : 0, ret: rev * A.returns, cg: l.ch === 'wf' ? rev * A.castlegate : 0,
+      col: p.col, cat: p.cat, type: p.type, size: p.size, color: p.color, name: p.name, fam: p.fam };
+  };
+  for (const l of lines) {
+    if (!l.ok) { pieces.push({ ...mk(l, l.qty, { po: '—', cogs: 0, fob: 0 }), rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, fee: 0, dda: 0, ret: 0, cg: 0, units0: l.qty }); continue; }
+    let q = l.qty; const L = layers[l.part] || [];
+    if (l.ch === 'wf') for (const ly of L) { if (q <= 0) break; if (ly.left <= 0) continue; const t = Math.min(q, ly.left); ly.left -= t; q -= t; pieces.push(mk(l, t, ly)); }
+    if (q > 0) { const lc = lastCost(l.part); pieces.push(mk(l, q, { po: l.ch === 'amz' ? 'Amazon stock' : 'Unassigned', cogs: lc.cogs, fob: lc.fob })); }
+  }
+  const dates = lines.map(l => l.date).filter(Boolean).sort();
+  M = { P, A, pos, layers, lines, pieces, first: dates[0] || D.meta.today, today: (D.meta && D.meta.today) || new Date().toISOString().slice(0, 10) };
+  M.listingParts = {}; for (const [k, p] of Object.entries(P)) if (p.fam) (M.listingParts[p.fam] = M.listingParts[p.fam] || []).push(k);
+}
+
+// ---------------- filters ----------------
+function presetRange(p) {
+  const t = M.today, y = t.slice(0, 4), m = t.slice(5, 7);
+  switch (p) {
+    case '7d': return [addDays(t, -6), t];
+    case '30d': return [addDays(t, -29), t];
+    case '90d': return [addDays(t, -89), t];
+    case 'mtd': return [`${y}-${m}-01`, t];
+    case 'qtd': return [`${y}-${String(Math.floor((+m - 1) / 3) * 3 + 1).padStart(2, '0')}-01`, t];
+    case 'ytd': return [`${y}-01-01`, t];
+    default: return [M.first < t ? M.first : t, t];
+  }
+}
+function range() { if (S.preset !== 'custom') [S.from, S.to] = presetRange(S.preset); return [S.from, S.to]; }
+function prevRange() { const [f, t] = range(); const n = diffDays(f, t) + 1; return [addDays(f, -n), addDays(f, -1)]; }
+const prodFilterOn = () => ['col', 'cat', 'type', 'size', 'color', 'sku'].some(k => S.f[k].size);
+function passProd(part) {
+  const p = M.P[part] || {}, f = S.f;
+  return (!f.col.size || f.col.has(p.col)) && (!f.cat.size || f.cat.has(p.cat)) && (!f.type.size || f.type.has(p.type)) && (!f.size.size || f.size.has(String(p.size))) && (!f.color.size || f.color.has(p.color)) && (!f.sku.size || f.sku.has(part));
+}
+// pieces passing every filter except the date range
+function basePieces({ includeBad = false, ignoreTT = false, ignoreProd = false, ignorePO = false } = {}) {
+  return M.pieces.filter(x => (includeBad || x.ok) && (S.platform === 'all' || x.ch === S.platform) && (ignoreTT || S.incTT || !x.tt) && (ignoreProd || passProd(x.part)) && (ignorePO || !S.f.po.size || S.f.po.has(x.layer)));
+}
+const inRange = (x, f, t) => x.date >= f && x.date <= t;
+function agg(ps) {
+  const o = { units: 0, rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, fee: 0, dda: 0, ret: 0, cg: 0 }, orders = new Set();
+  for (const x of ps) { o.units += x.qty; o.rev += x.rev; o.net += x.net; o.promo += x.promo; o.cogs += x.cogs; o.fob += x.fob; o.fee += x.fee; o.dda += x.dda; o.ret += x.ret; o.cg += x.cg; orders.add(x.po); }
+  o.orders = orders.size; o.gmv = o.rev * 2; o.aov = o.orders ? o.rev / o.orders : 0;
+  o.gp = o.net - o.fee - o.dda - o.cogs - o.ret - o.cg;   // before ads
+  return o;
+}
+
+// ---------------- advertising ----------------
+// Campaign totals come from the CAMPAIGN_REPORT; per-SKU spend from the SKU_REPORT (per listing), split across the
+// listing's child SKUs by their net revenue in the period (equal split when the listing sold nothing).
+function ads(f, t) {
+  const out = { spend: 0, impr: 0, clicks: 0, sales: 0, orders: 0, units: 0, byPart: {}, byListing: {}, daily: new Map(), camps: new Map(), unalloc: 0 };
+  if (S.platform !== 'amz') {
+    const W = D.wf || {}, ad = W.ads || {};
+    for (const r of ad.daily || []) { if (r[1] < f || r[1] > t) continue; out.spend += r[4]; out.impr += r[2]; out.clicks += r[3]; out.units += r[5]; out.sales += r[6]; out.orders += r[7];
+      const d = out.daily.get(r[1]) || { spend: 0, sales: 0, clicks: 0, impr: 0 }; d.spend += r[4]; d.sales += r[6]; d.clicks += r[3]; d.impr += r[2]; out.daily.set(r[1], d);
+      const c = out.camps.get(r[0]) || { id: r[0], spend: 0, impr: 0, clicks: 0, sales: 0, orders: 0, units: 0 }; c.spend += r[4]; c.impr += r[2]; c.clicks += r[3]; c.sales += r[6]; c.orders += r[7]; c.units += r[5]; out.camps.set(r[0], c); }
+    const L = {};
+    for (const r of W.adsSku || []) { if (r[0] < f || r[0] > t) continue; const x = L[r[1]] = L[r[1]] || { spend: 0, clicks: 0, impr: 0, sales: 0, orders: 0, units: 0 }; x.impr += r[2]; x.clicks += r[3]; x.spend += r[4]; x.sales += r[5]; x.orders += r[6]; x.units += r[7]; }
+    const skuTotal = sum(Object.values(L), x => x.spend), k = skuTotal > 0 ? out.spend / skuTotal : 0;
+    const netBy = {}; for (const x of basePieces({ ignoreProd: true, ignorePO: true })) if (x.ch === 'wf' && inRange(x, f, t)) netBy[x.part] = (netBy[x.part] || 0) + x.net;
+    for (const [lid, x] of Object.entries(L)) {
+      const spend = x.spend * k; out.byListing[lid] = { ...x, spend };
+      const kids = M.listingParts[lid] || [];
+      if (!kids.length) { out.unalloc += spend; continue; }
+      const tot = sum(kids, p => netBy[p] || 0);
+      const stocked = kids.filter(p => M.layers[p]), pool = tot > 0 ? kids : (stocked.length ? stocked : kids);
+      for (const p of pool) out.byPart[p] = (out.byPart[p] || 0) + spend * (tot > 0 ? (netBy[p] || 0) / tot : 1 / pool.length);
+    }
+    if (!skuTotal && out.spend) out.unalloc = out.spend;
+  }
+  if (S.platform !== 'wf') {
+    const A = (D.amz && D.amz.ads) || {};
+    for (const r of A.daily || []) { if (r[0] < f || r[0] > t) continue; out.spend += r[3]; out.impr += r[1]; out.clicks += r[2]; out.sales += r[4]; out.orders += r[5];
+      const d = out.daily.get(r[0]) || { spend: 0, sales: 0, clicks: 0, impr: 0 }; d.spend += r[3]; d.sales += r[4]; out.daily.set(r[0], d); }
+  }
+  // spend that applies to the current product / PO filter
+  if (prodFilterOn() || S.f.po.size) out.filtered = sum(Object.entries(out.byPart).filter(([p]) => passProd(p)), ([, v]) => v);
+  else out.filtered = out.spend;
+  return out;
+}
+
+// period summary with profit
+function period(f, t) {
+  const ps = basePieces().filter(x => inRange(x, f, t)); const a = agg(ps), ad = ads(f, t);
+  a.ads = ad.filtered; a.profit = a.gp - a.ads; a.margin = a.rev ? a.profit / a.rev : null; a.tacos = a.rev ? a.ads / a.rev : null; a.costs = a.rev - a.profit;
+  return { ps, a, ad };
+}
+function target(key, f, t) {
+  const K = D.kpi; if (!K || !K[key]) return null; let v = 0;
+  for (let d = f; d <= t; d = addDays(d, 1)) { const i = K.months.indexOf(d.slice(0, 7)); if (i >= 0) v += (K[key][i] || 0) / daysIn(d.slice(0, 7)); }
+  return v;
+}
+
+// ---------------- chart primitives (SVG strings) ----------------
+// charts are drawn at the card's real pixel width so text stays 12px on every screen
+function CW(kind = 'full') { const v = $('#view').clientWidth || 1000, pad = innerWidth <= 860 ? 34 : 46;
+  if (kind === 'half') return Math.round((v < 760 ? v : (v - 16) / 2) - pad);
+  if (kind === 'wide') return Math.round((v < 1280 ? v : (v - 16) * 2 / 3) - pad);
+  if (kind === 'third') return Math.round((v < 1280 ? v : (v - 16) / 3) - pad);
+  return Math.round(v - pad); }
+function nice(max, n = 4) { if (!(max > 0)) return { max: n, step: 1 }; const raw = max / n, mag = 10 ** Math.floor(Math.log10(raw)); const step = [1, 2, 2.5, 5, 10].find(x => x * mag >= raw) * mag; return { max: Math.ceil(max / step) * step, step }; }
+const rr = (x, y, w, h, r) => { if (h <= 0) return ''; r = Math.min(r, w / 2, h); return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; };
+function vbars(items, { fmt = n0, h = 260, w = CW('half'), colors, showVals = true, every = 1, axisFmt, series } = {}) {
+  // items: [{label, v | vs:[..], tip}] ; series: [{name,color}] for grouped bars
+  if (!items.length) return '<div class="empty">No data in this period</div>';
+  const C = SER(), ser = series || [{ name: '', color: (colors && colors[0]) || C[0] }], G = ser.length;
+  const vals = items.flatMap(i => i.vs || [i.v]); const sc = nice(Math.max(...vals, 0));
+  const L = 52, R = 8, T = showVals ? 20 : 10, B = 30, cw = w - L - R, ch = h - T - B, band = cw / items.length;
+  const bw = Math.min(G > 1 ? 22 : 46, band * (G > 1 ? 0.36 : 0.62)), gap = G > 1 ? 3 : 0;
+  const y = v => T + ch - (v / sc.max) * ch; const af = axisFmt || (v => fmt(v));
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let v = 0; v <= sc.max + 1e-9; v += sc.step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(af(v))}</text>`;
+  s += `</g>`;
+  items.forEach((it, i) => {
+    const cx = L + band * i + band / 2, vs = it.vs || [it.v], gw = G * bw + (G - 1) * gap;
+    s += `<g data-tip="${esc(it.tip || tipRows(it.label, ser.map((se, j) => [se.name || 'Value', fmt(vs[j]), G > 1 ? se.color : null])))}"><rect class="hit" x="${L + band * i}" y="${T}" width="${band}" height="${ch}"/>`;
+    vs.forEach((v, j) => { const x = cx - gw / 2 + j * (bw + gap); const col = (it.colors && it.colors[j]) || (colors && colors[i % colors.length] && G === 1 ? colors[i % colors.length] : ser[j].color);
+      s += `<path class="bar" d="${rr(x, y(Math.max(v, 0)), bw, Math.max(0, y(0) - y(Math.max(v, 0))), 4)}" fill="${col}"${ser[j].ghost ? ' fill-opacity=".35"' : ''}/>`;
+      if (showVals && G === 1 && v) s += `<text class="val-lbl" x="${x + bw / 2}" y="${y(v) - 6}" text-anchor="middle">${esc(fmt(v))}</text>`; });
+    if (i % Math.max(every, Math.ceil(46 / band)) === 0) s += `<text x="${cx}" y="${h - 10}" text-anchor="middle">${esc(it.label)}</text>`;
+    s += `</g>`;
   });
-  // Amazon orders: [id, date, status, sku, asin, qty, price, title]
-  const amo = ((D.amz && D.amz.orders) || []).map(r => ({ ch: 'amz', po: r[0], no: r[0], date: r[1], status: r[2], part: r[3], sku: r[3], asin: r[4], qty: +r[5] || 0, price: +r[6] || 0, rev: (+r[6] || 0) * (+r[5] || 0), name: r[7], tt: false, ok: OK_STATUS(r[2]), retailer: 'Amazon.com', cogs: cogsOf(r[3]) * (+r[5] || 0), gp: 0 }));
-  amo.forEach(o => { o.gp = o.rev - o.cogs; });
-  const today = (D.meta && D.meta.today) || new Date(Date.now() - 5 * 3600e3).toISOString().slice(0, 10);
-  // Wayfair ads daily: [campId, date, impr, clicks, spend, units, sales, orders]
-  const camps = new Map(((D.wf && D.wf.ads && D.wf.ads.camps) || []).map(c => [c[0], { id: c[0], name: c[1], status: c[2], start: c[3], cap: c[5] }]));
-  const wfAds = ((D.wf && D.wf.ads && D.wf.ads.daily) || []).map(r => ({ ch: 'wf', camp: r[0], date: r[1], impr: r[2], clicks: r[3], spend: r[4], units: r[5], sales: r[6], orders: r[7] }));
-  // Amazon ads daily (account): [date, impr, clicks, spend, sales, orders]
-  const amAds = ((D.amz && D.amz.ads && D.amz.ads.daily) || []).map(r => ({ ch: 'amz', camp: 'amz', date: r[0], impr: r[1] || 0, clicks: r[2] || 0, spend: r[3] || 0, sales: r[4] || 0, orders: r[5] || 0, units: r[5] || 0 }));
-  M = { P, prod, cogsOf, famOf, wfo, amo, orders: wfo.concat(amo).sort((a, b) => (b.date || '').localeCompare(a.date || '')), today, camps, wfAds, amAds };
+  s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
+  return `<div class="chart">${s}</div>` + (G > 1 ? `<div class="legend">${ser.map(se => `<span><i style="background:${se.color};${se.ghost ? 'opacity:.35' : ''}"></i>${esc(se.name)}</span>`).join('')}</div>` : '');
 }
-function range() {
-  const t = M.today; let from;
-  if (S.period === '7') from = addDays(t, -6); else if (S.period === '30') from = addDays(t, -29);
-  else if (S.period === 'mtd') from = t.slice(0, 8) + '01';
-  else if (S.period === 'qtd') { const m = +t.slice(5, 7); from = t.slice(0, 5) + String(m - (m - 1) % 3).padStart(2, '0') + '-01'; }
-  else from = '2000-01-01';
-  return { from, to: t, days: diffDays(from, t) + 1 };
+function lines(xs, series, { fmt = n0, h = 260, w = CW('full'), area = true } = {}) {
+  if (!xs.length) return '<div class="empty">No data in this period</div>';
+  const all = series.flatMap(s => s.vals), mn = Math.min(0, ...all);
+  const L = 56, R = 10, T = 12, B = 30, cw = w - L - R, ch = h - T - B, n = xs.length;
+  const x = i => L + (n === 1 ? cw / 2 : (i / (n - 1)) * cw), lo = mn < 0 ? -nice(-mn, 2).max : 0, hi = nice(Math.max(...all, 0), 4).max;
+  const y = v => T + ch - ((v - lo) / (hi - lo || 1)) * ch, step = nice(hi - lo).step;
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let v = lo; v <= hi + 1e-9; v += step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(fmt(v))}</text>`;
+  s += `</g>`;
+  if (lo < 0) s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${y(0)}" y2="${y(0)}"/>`;
+  for (const se of series) {
+    const pts = se.vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+    if (area && !se.dash) s += `<path d="M${x(0)},${y(Math.max(lo, 0))}L${pts.join('L')}L${x(n - 1)},${y(Math.max(lo, 0))}Z" fill="${se.color}" fill-opacity=".10"/>`;
+    s += `<polyline points="${pts.join(' ')}" fill="none" stroke="${se.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${se.dash ? ' stroke-dasharray="5 4"' : ''}/>`;
+    if (n <= 40) se.vals.forEach((v, i) => { s += `<circle cx="${x(i)}" cy="${y(v)}" r="${n > 20 ? 2.5 : 3.5}" fill="${se.color}" stroke="var(--glass-strong)" stroke-width="1.5"/>`; });
+  }
+  const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(cw / 80)))), hw = n === 1 ? cw : cw / (n - 1);
+  xs.forEach((lb, i) => {
+    s += `<g class="hov" data-tip="${esc(tipRows(lb, series.map(se => [se.name, fmt(se.vals[i]), se.color])))}"><line class="xh" x1="${x(i)}" x2="${x(i)}" y1="${T}" y2="${T + ch}"/><rect class="hit" x="${x(i) - hw / 2}" y="${T}" width="${hw}" height="${ch}"/></g>`;
+    if (i % every === 0 || i === n - 1 && n < 10) s += `<text x="${x(i)}" y="${h - 10}" text-anchor="middle">${esc(lb)}</text>`;
+  });
+  s += `</svg>`;
+  return `<div class="chart">${s}</div><div class="legend">${series.map(se => `<span><i class="${se.dash ? 'dash' : 'line'}" style="background:${se.color};color:${se.color}"></i>${esc(se.name)}</span>`).join('')}</div>`;
 }
-function prevRange(r) { if (S.period === 'all') return null; const len = r.days; return { from: addDays(r.from, -len), to: addDays(r.from, -1) }; }
-const inR = (d, r) => d && d >= r.from && d <= r.to;
-function ordersIn(r, opt = {}) {
-  return M.orders.filter(o => inR(o.date, r) && (S.channel === 'all' || o.ch === S.channel) && (opt.all || o.ok) && (opt.tt ?? S.incTT ? true : !o.tt));
+function donut(items, { fmt = n0, center, sub = 'total' } = {}) {
+  items = items.filter(i => i.v > 0); const tot = sum(items, i => i.v);
+  if (!tot) return '<div class="empty">No data in this period</div>';
+  const C = SER(); let a = -Math.PI / 2, s = `<svg viewBox="0 0 200 200">`;
+  const R = 86, r = 60;
+  items.forEach((it, i) => {
+    const col = it.color || C[i % C.length], frac = it.v / tot, a2 = a + frac * Math.PI * 2 - (items.length > 1 ? 0.012 : 0);
+    const big = a2 - a > Math.PI ? 1 : 0, p = (rad, ang) => [100 + rad * Math.cos(ang), 100 + rad * Math.sin(ang)];
+    const [x1, y1] = p(R, a), [x2, y2] = p(R, a2), [x3, y3] = p(r, a2), [x4, y4] = p(r, a);
+    const d = frac >= 0.999 ? `M100,${100 - R}A${R},${R} 0 1 1 99.99,${100 - R}L99.99,${100 - r}A${r},${r} 0 1 0 100,${100 - r}Z` : `M${x1},${y1}A${R},${R} 0 ${big} 1 ${x2},${y2}L${x3},${y3}A${r},${r} 0 ${big} 0 ${x4},${y4}Z`;
+    s += `<path d="${d}" fill="${col}" data-tip="${esc(tipRows(it.label, [['Value', fmt(it.v)], ['Share', pct(frac, 1)], ...(it.extra || [])]))}"/>`;
+    a += frac * Math.PI * 2;
+  });
+  s += `<text x="100" y="98" text-anchor="middle" style="font:700 22px var(--font);fill:var(--ink)">${esc(center ?? fmt(tot))}</text><text x="100" y="118" text-anchor="middle" style="font:12px var(--font);fill:var(--muted)">${esc(sub)}</text></svg>`;
+  return `<div class="donut-wrap"><div class="chart">${s}</div><div class="donut-list">${items.map((it, i) => `<div data-tip="${esc(tipRows(it.label, [['Value', fmt(it.v)], ['Share', pct(it.v / tot, 1)], ...(it.extra || [])]))}"><i style="background:${it.color || C[i % C.length]}"></i><span>${esc(it.label)}</span><b>${esc(fmt(it.v))}</b><small>${pct(it.v / tot)}</small></div>`).join('')}</div></div>`;
 }
-function adsIn(r) { return (S.channel === 'amz' ? [] : M.wfAds).concat(S.channel === 'wf' ? [] : M.amAds).filter(a => inR(a.date, r)); }
-function agg(os) { const rev = sum(os, o => o.rev), units = sum(os, o => o.qty), cogs = sum(os, o => o.cogs), gp = sum(os, o => o.gp); const ords = new Set(os.map(o => o.po)).size; return { rev, units, ords, cogs, gp, aov: ords ? rev / ords : 0, gpm: rev ? gp / rev : null }; }
-function deltaHtml(cur, prev, invert) { if (prev == null) return ''; if (!prev) return '<span class="delta">kỳ trước chưa có số</span>'; const d = (cur - prev) / Math.abs(prev); const up = d >= 0; const good = invert ? !up : up; return `<span class="delta ${good ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(d * 100).toFixed(0)}%</span>`; }
-
-// ---------------- charts (SVG, hover tooltips) ----------------
-const tip = $('#tip');
-function showTip(e, html) { tip.innerHTML = html; tip.hidden = false; const x = (e.touches ? e.touches[0] : e).clientX, y = (e.touches ? e.touches[0] : e).clientY; const w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.min(innerWidth - w - 8, Math.max(8, x + 14)) + 'px'; tip.style.top = Math.max(8, y - h - 12) + 'px'; }
-function hideTip() { tip.hidden = true; }
-document.addEventListener('scroll', hideTip, { passive: true });
-const ticks = (max, n = 4) => { if (max <= 0) return [0, 1]; const raw = max / n, p = Math.pow(10, Math.floor(Math.log10(raw))), s = [1, 2, 2.5, 5, 10].find(m => m * p >= raw) * p; const out = []; for (let v = 0; v <= max + s * .001; v += s) out.push(v); if (out[out.length - 1] < max) out.push(out[out.length - 1] + s); return out; };
-function rr(x, y, w, h, r) { r = Math.min(r, w / 2, Math.abs(h)); if (h <= 0) return ''; return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; }
-
-/* bars: {labels, series:[{name,color,values,dash?, type:'bar'|'line'}], fmt, height} — one y-axis only */
-function barChart(el, cfg) {
-  const W = Math.max(320, el.clientWidth || 600), H = cfg.height || 240, pl = 46, pr = 10, pt = 12, pb = 26;
-  const iw = W - pl - pr, ih = H - pt - pb, n = cfg.labels.length;
-  const bars = cfg.series.filter(s => s.type !== 'line'), lines = cfg.series.filter(s => s.type === 'line');
-  const max = Math.max(1, ...cfg.series.flatMap(s => s.values.map(v => v || 0)));
-  const T = ticks(max), top = T[T.length - 1], y = v => pt + ih - (v / top) * ih;
-  const bw = iw / n, gap = Math.min(10, bw * .25), inner = bw - gap, each = Math.min(48, Math.max(2, (inner - 2 * (bars.length - 1)) / Math.max(1, bars.length))), off = (inner - (each * bars.length + 2 * (bars.length - 1))) / 2;
-  let g = `<g class="grid">${T.map(t => `<line x1="${pl}" x2="${W - pr}" y1="${y(t)}" y2="${y(t)}"/><text x="${pl - 8}" y="${y(t) + 4}" text-anchor="end">${cfg.fmtAxis ? cfg.fmtAxis(t) : t}</text>`).join('')}</g>`;
-  const every = Math.ceil(n / Math.floor(iw / 46));
-  g += cfg.labels.map((l, i) => i % every ? '' : `<text x="${pl + bw * i + bw / 2}" y="${H - 8}" text-anchor="middle">${esc(l)}</text>`).join('');
-  bars.forEach((s, si) => s.values.forEach((v, i) => { if (!v) return; const x = pl + bw * i + gap / 2 + off + si * (each + 2), yy = y(v); g += `<path d="${rr(x, yy, each, pt + ih - yy, 4)}" fill="${s.color}" ${s.opacity ? `opacity="${s.opacity}"` : ''}/>`; }));
-  lines.forEach(s => { const pts = s.values.map((v, i) => v == null ? null : [pl + bw * i + bw / 2, y(v)]); let d = '', pen = false; pts.forEach(p => { if (!p) { pen = false; return; } d += (pen ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); pen = true; });
-    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" ${s.dash ? 'stroke-dasharray="5 4"' : ''} stroke-linejoin="round" stroke-linecap="round"/>`; pts.forEach(p => { if (p && n <= 31) g += `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${s.color}" stroke="var(--glass-strong)" stroke-width="1.5"/>`; }); });
-  g += `<line class="axis" x1="${pl}" x2="${W - pr}" y1="${pt + ih}" y2="${pt + ih}"/>`;
-  g += cfg.labels.map((l, i) => `<rect class="hit" data-i="${i}" x="${pl + bw * i}" y="${pt}" width="${bw}" height="${ih}"/>`).join('');
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(cfg.aria || '')}">${g}</svg>`;
-  const f = cfg.fmt || (v => n0(v));
-  $$('.hit', el).forEach(r => { const i = +r.dataset.i; const h = e => showTip(e, `<b>${esc(cfg.tipLabels ? cfg.tipLabels[i] : cfg.labels[i])}</b>` + cfg.series.map(s => `<div><span><i style="background:${s.color}"></i>${esc(s.name)}</span><span>${s.values[i] == null ? '—' : f(s.values[i])}</span></div>`).join('') + (cfg.extraTip ? cfg.extraTip(i) : ''));
-    r.addEventListener('mousemove', h); r.addEventListener('touchstart', h, { passive: true }); r.addEventListener('mouseleave', hideTip); });
-}
-function donut(el, items, fmt = n0, total) {
-  const C = SER(), tot = total ?? sum(items, x => x.v); const R = 62, r = 42, cx = 75, cy = 75;
-  let a0 = -Math.PI / 2, paths = '';
-  const gapA = items.length > 1 ? 0.025 : 0;
-  items.forEach((it, i) => { const frac = tot ? it.v / tot : 0; if (frac <= 0) return; const a1 = a0 + frac * Math.PI * 2; const s = a0 + gapA / 2, e = Math.max(s + 0.001, a1 - gapA / 2); const big = e - s > Math.PI ? 1 : 0;
-    const p = (rad, ang) => [cx + rad * Math.cos(ang), cy + rad * Math.sin(ang)];
-    const [x1, y1] = p(R, s), [x2, y2] = p(R, e), [x3, y3] = p(r, e), [x4, y4] = p(r, s);
-    paths += frac >= .9999 ? `<circle cx="${cx}" cy="${cy}" r="${(R + r) / 2}" fill="none" stroke="${it.color || C[i % C.length]}" stroke-width="${R - r}" data-i="${i}" class="seg"/>`
-      : `<path class="seg" data-i="${i}" d="M${x1},${y1}A${R},${R} 0 ${big} 1 ${x2},${y2}L${x3},${y3}A${r},${r} 0 ${big} 0 ${x4},${y4}Z" fill="${it.color || C[i % C.length]}"/>`; a0 = a1; });
-  el.innerHTML = `<div class="donut-wrap"><svg viewBox="0 0 150 150" role="img">${paths}<text x="75" y="72" text-anchor="middle" class="lbl-strong" style="font-size:17px">${esc(items.centerTop || fmt(tot))}</text><text x="75" y="90" text-anchor="middle">${esc(items.centerSub || 'tổng')}</text></svg>
-    <div class="donut-list">${items.map((it, i) => `<div><i style="background:${it.color || C[i % C.length]}"></i><span>${esc(it.k)}</span><b>${fmt(it.v)}</b><small>${tot ? pct(it.v / tot) : '—'}</small></div>`).join('') || '<div class="empty">Chưa có dữ liệu</div>'}</div></div>`;
-  $$('.seg', el).forEach(p => { const it = items[+p.dataset.i]; const h = e => showTip(e, `<b>${esc(it.k)}</b><div><span>Giá trị</span><span>${fmt(it.v)}</span></div><div><span>Tỷ trọng</span><span>${pct(it.v / tot, 1)}</span></div>` + (it.extra || ''));
-    p.addEventListener('mousemove', h); p.addEventListener('touchstart', h, { passive: true }); p.addEventListener('mouseleave', hideTip); });
+function hbars(items, { fmt = n0, color } = {}) {
+  if (!items.length || !items.some(i => i.v)) return '<div class="empty">No data in this period</div>';
+  const max = Math.max(1, ...items.map(i => Math.abs(i.v))), C = SER();
+  return `<div class="hbar">${items.map((it, i) => `<div class="row" data-tip="${esc(it.tip || tipRows(it.label, [['Value', fmt(it.v)], ...(it.extra || [])]))}"><span>${esc(it.label)}</span><div class="tr"><i style="width:${Math.max(1.5, Math.abs(it.v) / max * 100)}%;background:${it.v < 0 ? cssv('--crit') : (it.color || color || C[0])}"></i></div><b>${esc(fmt(it.v))}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</b></div>`).join('')}</div>`;
 }
 function ring(frac, label, color) {
-  const R = 70, c = 2 * Math.PI * R, f = Math.max(0, Math.min(1, frac || 0)), over = (frac || 0) > 1;
-  return `<svg class="ring" viewBox="0 0 168 168" role="img" aria-label="${esc(label)}"><circle cx="84" cy="84" r="${R}" fill="none" stroke="var(--grid)" stroke-width="14"/>
-  <circle cx="84" cy="84" r="${R}" fill="none" stroke="${color || 'url(#rg)'}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${c * f} ${c}" transform="rotate(-90 84 84)" style="transition:stroke-dasharray 1s cubic-bezier(.2,.8,.2,1)"/>
-  <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9fc6d1"/><stop offset="1" stop-color="#664139"/></linearGradient></defs>
-  <text x="84" y="84" text-anchor="middle" style="font:700 30px var(--font);fill:var(--ink);letter-spacing:-.03em">${frac == null ? '—' : Math.round(frac * 100) + '%'}</text>
-  <text x="84" y="106" text-anchor="middle" style="font:600 12px var(--font);fill:var(--muted)">${esc(label)}${over ? ' ✓' : ''}</text></svg>`;
+  const r = 70, c = 2 * Math.PI * r, f = Math.max(0, Math.min(1, frac || 0));
+  return `<svg class="ring" viewBox="0 0 170 170"><circle cx="85" cy="85" r="${r}" fill="none" stroke="var(--grid)" stroke-width="14"/><circle cx="85" cy="85" r="${r}" fill="none" stroke="${color}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${c * f} ${c}" transform="rotate(-90 85 85)"/><text x="85" y="86" text-anchor="middle" style="font:750 34px var(--font);fill:var(--ink);letter-spacing:-1px">${esc(pct(frac))}</text><text x="85" y="108" text-anchor="middle" style="font:12px var(--font);fill:var(--muted)">${esc(label)}</text></svg>`;
 }
-function hbars(items, fmt = n0, color) { const max = Math.max(1, ...items.map(i => i.v)); const C = SER();
-  return `<div class="hbar">${items.map((it, i) => `<div class="row"><span title="${esc(it.k)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.k)}</span><div class="tr"><i style="width:${(it.v / max * 100).toFixed(1)}%;background:${it.color || color || C[0]}"></i></div><b>${fmt(it.v)}</b></div>`).join('') || '<div class="empty">Chưa có dữ liệu</div>'}</div>`; }
-const card = (title, sub, body, extra = '') => `<section class="card glass">${title ? `<div class="card-head"><div><h3>${title}</h3>${sub ? `<p class="sub">${sub}</p>` : ''}</div>${extra}</div>` : ''}${body}</section>`;
-const kpi = (lbl, val, meta = '', right = '', bar) => `<section class="card glass kpi"><div class="lbl"><span>${lbl}</span>${right}</div><div class="val">${val}</div><div class="meta">${meta}</div>${bar != null ? `<div class="bar-track"><i style="width:${Math.min(100, bar * 100).toFixed(1)}%"></i></div>` : ''}</section>`;
-const dayList = r => { const out = []; for (let d = r.from; d <= r.to; d = addDays(d, 1)) out.push(d); return out; };
-
-// ---------------- CastleGate free-storage model (FIFO by received date) ----------------
-function cgModel() {
-  const man = (D.wf && D.wf.inbItems) || {};
-  const recvMan = (D.wf && D.wf.inbRecv) || {};
-  const inb = ((D.wf && D.wf.inb) || []).filter(p => !/cancel/i.test(p.status)).map(p => ({ ...p, recvStart: p.recvStart || recvMan[p.id] || null, items: (p.items && p.items.length) ? p.items : (man[p.id] || man[p.po] || []) }));
-  const received = inb.filter(p => p.recvStart).sort((a, b) => a.recvStart.localeCompare(b.recvStart));
-  const inv = new Map(((D.wf && D.wf.inv) || []).map(r => [r[0], { part: r[0], fam: r[1], inStock: Math.max(0, r[2] || 0), avail: Math.max(0, r[3] || 0), onOrder: r[4] || 0, retail: r[5], wholesale: r[6], aged: r[7] || 0, n3m: r[8] || 0, purch: r[9], status: r[10], supply: r[11] }]));
-  const t = M.today, from30 = addDays(t, -29);
-  const sold30 = new Map(); M.wfo.filter(o => o.ok && inR(o.date, { from: from30, to: t })).forEach(o => sold30.set(o.part, (sold30.get(o.part) || 0) + o.qty));
-  // FIFO: on-hand belongs to newest receipts first; oldest receipt is consumed first
-  const pos = received.map(p => { const recv = p.recvStart.slice(0, 10), freeEnd = addDays(recv, FREE_DAYS); return { ...p, recv, freeEnd, daysLeft: diffDays(t, freeEnd), elapsed: diffDays(recv, t), lines: [] }; });
-  const parts = new Set(pos.flatMap(p => p.items.map(i => i[0])));
-  for (const part of parts) {
-    let onHand = (inv.get(part) || {}).inStock || 0;
-    const newestFirst = pos.filter(p => p.items.some(i => i[0] === part && i[3] > 0)).sort((a, b) => b.recv.localeCompare(a.recv));
-    for (const p of newestFirst) { const rec = p.items.find(i => i[0] === part)[3]; const left = Math.min(rec, onHand); onHand -= left;
-      const v = (sold30.get(part) || 0) / 30; const proj = Math.max(0, left - v * Math.max(0, p.daysLeft));
-      p.lines.push({ part, received: rec, left, sold: rec - left, vel: v, need: p.daysLeft > 0 ? left / p.daysLeft : null, projLeft: proj, cogs: M.cogsOf(part) }); }
+function waterfall(steps, { h = 320, w = CW('full') } = {}) {
+  if (w < 600) { // phones: a vertical P&L statement reads better than a squeezed waterfall
+    const rev = steps[0].v || 1;
+    return `<div class="pnl">${steps.map(s => `<div class="${s.kind === 'total' ? 'tot' : ''}" data-tip="${esc(tipRows(s.label, [['Amount', usd(s.v)], ['% of revenue', pct(s.v / rev, 1)]]))}"><span>${s.kind === 'total' ? '' : '− '}${esc(s.label)}</span><b class="${s.kind === 'total' && s.v < 0 ? 'neg' : ''}">${usd(s.v)}</b><small>${pct(s.v / rev, 1)}</small><i style="width:${Math.min(100, Math.abs(s.v) / rev * 100)}%;background:${s.kind === 'total' ? (s.v < 0 ? cssv('--crit') : s.label === 'Revenue' ? cssv('--s1') : cssv('--s3')) : cssv('--s2')}"></i></div>`).join('')}</div>`;
   }
-  pos.forEach(p => { p.lines.sort((a, b) => b.projLeft * b.cogs - a.projLeft * a.cogs); p.recvUnits = sum(p.lines, l => l.received); p.left = sum(p.lines, l => l.left); p.projLeft = sum(p.lines, l => l.projLeft); p.projVal = sum(p.lines, l => l.projLeft * l.cogs); });
-  const open = inb.filter(p => !p.recvStart);
-  return { pos, open, inv, sold30, all: inb };
+  // steps: [{label, v, kind:'total'|'down'}]
+  const L = 56, R = 8, T = 22, B = 44, cw = w - L - R, ch = h - T - B, n = steps.length, band = cw / n, bw = Math.min(56, band * 0.64);
+  let run = 0; const bars = steps.map(s => { if (s.kind === 'total') { const b = { ...s, y0: 0, y1: s.v }; run = s.v; return b; } const b = { ...s, y0: run, y1: run - s.v }; run -= s.v; return b; });
+  const hi = nice(Math.max(...bars.map(b => Math.max(b.y0, b.y1)), 0)).max, lo = Math.min(0, ...bars.map(b => Math.min(b.y0, b.y1))), loN = lo < 0 ? -nice(-lo).max : 0;
+  const y = v => T + ch - ((v - loN) / (hi - loN || 1)) * ch, step = nice(hi - loN).step, C = SER();
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let v = loN; v <= hi + 1e-9; v += step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${esc(usdK(v))}</text>`;
+  s += `</g>`;
+  bars.forEach((b, i) => {
+    const x = L + band * i + (band - bw) / 2, top = y(Math.max(b.y0, b.y1)), bot = y(Math.min(b.y0, b.y1));
+    const col = b.kind === 'total' ? (b.v < 0 ? cssv('--crit') : (i === 0 ? C[0] : C[2])) : cssv('--s2');
+    s += `<g data-tip="${esc(tipRows(b.label, [[b.kind === 'total' ? 'Amount' : 'Cost', usd(b.v)], ...(b.share != null ? [['% of revenue', pct(b.share, 1)]] : [])]))}"><rect class="hit" x="${L + band * i}" y="${T}" width="${band}" height="${ch}"/><rect class="bar" x="${x}" y="${top}" width="${bw}" height="${Math.max(1, bot - top)}" rx="4" fill="${col}"${b.kind === 'total' ? '' : ' fill-opacity=".85"'}/>`;
+    s += `<text class="val-lbl" x="${x + bw / 2}" y="${top - 6}" text-anchor="middle">${esc((b.kind === 'total' ? '' : '−') + usdK(b.v))}</text>`;
+    const words = b.label.split(' '); s += `<text x="${x + bw / 2}" y="${h - 26}" text-anchor="middle">${esc(words.slice(0, 2).join(' '))}</text>${words.length > 2 ? `<text x="${x + bw / 2}" y="${h - 12}" text-anchor="middle">${esc(words.slice(2).join(' '))}</text>` : ''}</g>`;
+    if (i < n - 1) s += `<line x1="${x + bw}" x2="${x + band}" y1="${y(b.y1)}" y2="${y(b.y1)}" stroke="var(--axis)" stroke-dasharray="3 3"/>`;
+  });
+  s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
+  return `<div class="chart">${s}</div>`;
 }
+function usMap(stats, metric = 'rev') {
+  if (!US) return '<div class="chart map" id="usmap"><div class="empty">Loading map…</div></div>';
+  const max = Math.max(1, ...Object.values(stats).map(s => s[metric] || 0)), base = cssv('--s1');
+  let s = `<svg viewBox="0 0 975 610" role="img" aria-label="Revenue by US state">`;
+  for (const [code, g] of Object.entries(US)) {
+    const st = stats[code], v = st ? st[metric] || 0 : 0, info = STATES[code] || [g.n, '', ''];
+    const op = v ? 0.18 + 0.82 * Math.sqrt(v / max) : 0;
+    s += `<path d="${g.d}" fill="${v ? base : 'var(--grid)'}" fill-opacity="${v ? op.toFixed(2) : 1}" data-tip="${esc(tipRows(info[0] + ' (' + code + ')', [['Region', info[1]], ['Coast', info[2]], ['Units sold', n0(st ? st.units : 0)], ['Orders', n0(st ? st.orders : 0)], ['Revenue', usd(st ? st.rev : 0)], ['Net revenue', usd(st ? st.net : 0)]]))}"/>`;
+  }
+  for (const [code, g] of Object.entries(US)) if (stats[code] && !['DC', 'RI', 'DE', 'CT', 'NJ', 'MD', 'MA', 'NH', 'VT'].includes(code)) s += `<text x="${g.c[0]}" y="${g.c[1] + 3}" text-anchor="middle">${code}</text>`;
+  s += `</svg>`;
+  return `<div class="chart map" id="usmap">${s}</div><div class="map-legend"><span>Lower</span><span class="grad" style="background:linear-gradient(90deg,color-mix(in srgb,${base} 18%,transparent),${base})"></span><span>Higher revenue</span><span style="margin-left:auto">Grey = no orders</span></div>`;
+}
+async function loadMap() { if (US) return; try { US = await (await fetch('assets/us-states.json')).json(); if (S.tab === 'customers') render(); } catch (e) {} }
+
+// ---------------- UI pieces ----------------
+const card = (title, sub, body, { cls = '', actions = '', id = '' } = {}) => `<section class="card glass ${cls}"${id ? ` id="${id}"` : ''}><div class="card-head"><div><h3>${title}</h3>${sub ? `<p class="sub">${sub}</p>` : ''}</div>${actions}</div>${body}</section>`;
+function delta(cur, prev, { invert = false, pp = false } = {}) {
+  if (!S.compare || prev == null || cur == null || !isFinite(prev) || (!pp && !prev)) return '';
+  const d = pp ? cur - prev : (cur - prev) / Math.abs(prev); if (!isFinite(d)) return '';
+  const cls = Math.abs(d) < 0.005 ? 'flat' : ((d > 0) !== invert ? 'up' : 'down');
+  return `<span class="delta ${cls}">${d > 0 ? '▲' : d < 0 ? '▼' : ''} ${pp ? (d * 100).toFixed(1) + ' pp' : pct(Math.abs(d), Math.abs(d) < 0.1 ? 1 : 0)}</span>`;
+}
+const kpi = (label, val, meta = '', info = '') => `<div class="kpi card glass"><div class="lbl"><span>${label}</span>${info ? `<span class="info" data-tip="${esc(`<b>${esc(label)}</b><span style="color:var(--ink2)">${esc(info)}</span>`)}">i</span>` : ''}</div><div class="val">${val}</div><div class="meta">${meta}</div></div>`;
+const vsPrev = () => S.compare ? '<span>vs prev. period</span>' : '';
+function table(id, cols, rows, { foot = null, def = null, max = 0 } = {}) {
+  const st = S.sort[id] || def || {}; let rs = rows.slice();
+  if (st.k) { const c = cols.find(c => c.k === st.k); const val = c && c.sv ? c.sv : r => r[st.k]; rs.sort((a, b) => { const x = val(a), y = val(b); return (typeof x === 'string' || typeof y === 'string' ? String(x ?? '').localeCompare(String(y ?? '')) : (x ?? -Infinity) - (y ?? -Infinity)) * (st.d === 'asc' ? 1 : -1); }); }
+  if (max) rs = rs.slice(0, max);
+  const cell = (c, r) => { const v = c.f ? c.f(r[c.k], r) : esc(r[c.k] ?? '—'); const neg = c.neg && (r[c.k] < 0); return `<td class="${c.num ? 'num' : ''}${neg ? ' neg' : ''}">${v}</td>`; };
+  return `<div class="tbl-wrap"><table data-table="${id}"><thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}"${c.nosort ? '' : ` data-sort="${c.k}"`}>${esc(c.l)}${st.k === c.k ? `<span class="arr">${st.d === 'asc' ? '↑' : '↓'}</span>` : ''}</th>`).join('')}</tr></thead>
+    <tbody>${rs.map(r => `<tr>${cols.map(c => cell(c, r)).join('')}</tr>`).join('') || `<tr><td colspan="${cols.length}" class="empty">No rows for the current filters</td></tr>`}</tbody>
+    ${foot ? `<tfoot><tr>${cols.map(c => cell(c, foot)).join('')}</tr></tfoot>` : ''}</table></div>`;
+}
+const skuCell = (part) => { if (!M.P[part]) return `<b>${esc(part)}</b>`; const p = M.P[part]; return `<div class="sku"><span class="dot" style="background:${colColor(p.col)}"></span><div><b>${esc(part)}</b><small>${esc(p.name || '')}</small></div></div>`; };
+const COLS = ['Zena', 'Calix', 'Caroline', 'Vestra'];
+const colColor = c => { const C = SER(); const i = COLS.indexOf(c); return i >= 0 ? C[i] : C[4]; };
+function rangeText() { const [f, t] = range(); return `${dLong(f)} – ${dLong(t)} · ${diffDays(f, t) + 1} days`; }
+function activeChips() {
+  const out = [];
+  if (S.platform !== 'all') out.push(['platform', '', S.platform === 'wf' ? 'Wayfair' : 'Amazon']);
+  for (const [k, lbl] of FILTER_KEYS) for (const v of S.f[k]) out.push([k, v, `${lbl}: ${k === 'size' ? sizeLbl(v) : v}`]);
+  if (S.incTT) out.push(['tt', '', 'Incl. Tried & True']);
+  return out.length ? `<div class="chips-active">${out.map(([k, v, l]) => `<span class="tag" data-unchip="${esc(k)}" data-v="${esc(v)}">${esc(l)} ✕</span>`).join('')}</div>` : '';
+}
+const pageHead = (title, sub) => `<div class="page-head"><div><h1>${title}</h1><p>${sub || rangeText() + (S.compare ? ' · compared with the previous ' + (diffDays(...range()) + 1) + ' days' : '')}</p></div>${activeChips()}</div>`;
+
+// daily series helper
+function daysOf(f, t) { const out = []; for (let d = f; d <= t; d = addDays(d, 1)) out.push(d); return out; }
+function byDay(ps, f, t, fn) { const m = groupBy(ps, x => x.date); return daysOf(f, t).map(d => fn(m.get(d) || [], d)); }
 
 // ---------------- views ----------------
 function viewOverview() {
-  const r = range(), pr = prevRange(r);
-  const cur = agg(ordersIn(r)), prev = pr ? agg(ordersIn(pr)) : null;
-  const ads = adsIn(r), spend = sum(ads, a => a.spend), adSales = sum(ads, a => a.sales);
-  const pAds = pr ? sum(adsIn(pr), a => a.spend) : null;
-  const k = D.kpi || { months: [] }; const ym = M.today.slice(0, 7); const ki = k.months.indexOf(ym);
-  const mtd = agg(ordersIn({ from: ym + '-01', to: M.today }));
-  const target = ki >= 0 ? k.rev[ki] : null, dim = new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate(), dayN = +M.today.slice(8, 10);
-  const paceTarget = target ? target * dayN / dim : null, runRate = mtd.rev / dayN * dim;
-  const cg = cgModel(); const first = cg.pos[0];
-  const ttAll = M.wfo.filter(o => o.tt && o.ok);
-  // alerts
-  const al = [];
-  if (first) { const cls = first.daysLeft <= 14 ? 'crit' : first.daysLeft <= 30 ? 'warn' : 'info';
-    al.push(`<div class="alert ${cls}"><span class="ic">⏳</span><div><b>CastleGate ${esc(first.id)}: còn ${first.daysLeft} ngày miễn phí lưu kho (đến ${dLong(first.freeEnd)})</b><span>Còn ${n0(first.left)}/${n0(first.recvUnits)} sản phẩm của lô này trong kho. Với tốc độ bán 30 ngày gần nhất, dự kiến còn ~${n0(first.projLeft)} sản phẩm (giá vốn ~${usd(first.projVal)}) khi hết hạn miễn phí.</span></div></div>`); }
-  const amzBad = ((D.amz && D.amz.ads && D.amz.ads.camps) || []).filter(c => /PAYMENT/i.test(c[3] || ''));
-  if (amzBad.length) al.push(`<div class="alert crit"><span class="ic">!</span><div><b>Amazon Ads: ${amzBad.length} chiến dịch đang dừng vì lỗi thanh toán</b><span>Trạng thái "Advertiser payment failure" — cập nhật phương thức thanh toán trong Amazon Ads &gt; Billing để quảng cáo chạy lại.</span></div></div>`);
-  const oos = [...cg.inv.values()].filter(x => x.status === 'ACTIVE' && x.purch === 'PURCHASABLE' && x.avail <= 0);
-  const stockNoBuy = [...cg.inv.values()].filter(x => x.inStock > 0 && x.purch != null && x.purch !== 'PURCHASABLE');
-  if (stockNoBuy.length) al.push(`<div class="alert warn"><span class="ic">!</span><div><b>${stockNoBuy.length} SKU có hàng trong kho nhưng đang "Unpurchasable"</b><span>${stockNoBuy.map(x => esc(x.part) + ' (' + x.inStock + ')').join(', ')} — khách không mua được dù còn tồn.</span></div></div>`);
-  if (oos.length) al.push(`<div class="alert warn"><span class="ic">!</span><div><b>${oos.length} SKU đang bán nhưng hết hàng khả dụng</b><span>${oos.map(x => esc(x.part)).join(', ')}</span></div></div>`);
-  if (ttAll.length) al.push(`<div class="alert info"><span class="ic">★</span><div><b>${ttAll.length} đơn Tried &amp; True (review for free sample)</b><span>Đã tách khỏi doanh thu bán hàng${S.incTT ? ' — hiện đang được cộng vào số liệu theo lựa chọn bộ lọc' : ''}. Giá trị: ${usd(sum(ttAll, o => o.rev))}.</span></div></div>`);
-  const tacos = cur.rev ? spend / cur.rev : null;
-  return `
-  <section class="card glass hero">
-    ${ring(target ? mtd.rev / target : null, 'KPI ' + mLabel(ym))}
+  const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
+  const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
+  // month-to-date vs plan (ignores the date filter, keeps the others)
+  const ym = M.today.slice(0, 7), mtd = period(ym + '-01', M.today).a, ki = D.kpi ? D.kpi.months.indexOf(ym) : -1;
+  const goal = ki >= 0 ? D.kpi.rev[ki] : 0, dIn = daysIn(ym), dNow = +M.today.slice(8, 10), pace = goal * dNow / dIn, proj = mtd.rev / dNow * dIn;
+  const gUnits = ki >= 0 ? D.kpi.unit[ki] : 0, gProfit = ki >= 0 ? D.kpi.profit[ki] : 0;
+  const tgt = target('rev', f, t);
+  // monthly actual vs target
+  const months = D.kpi ? D.kpi.months : []; const allPs = basePieces();
+  const actBy = groupBy(allPs, x => x.date.slice(0, 7));
+  const shown = S.kpiAll ? months : months.filter(m => m <= M.today.slice(0, 7) || m === addDays(M.today, 31).slice(0, 7));
+  const days = daysOf(f, t), dayPs = byDay(cur.ps, f, t, ps => agg(ps));
+  const dayAds = days.map(d => (cur.ad.daily.get(d) || {}).spend || 0);
+  const alerts = buildAlerts(cur);
+  const byCol = groupBy(cur.ps, x => x.col), byType = groupBy(cur.ps, x => x.type);
+  return `${pageHead('Overview')}
+  <section class="hero card glass">
+    ${ring(goal ? mtd.rev / goal : 0, MON[+ym.slice(5) - 1] + ' target', mtd.rev >= pace ? cssv('--s3') : cssv('--s2'))}
     <div>
-      <h2>Doanh thu tháng ${mLabel(ym)} · so với KPI</h2>
-      <div class="big">${usd(mtd.rev)} <span class="of">/ ${target ? usd(target) : 'chưa có KPI'}</span></div>
-      <div class="line">${target ? `Theo tiến độ ngày ${dayN}/${dim}: cần ${usd(paceTarget)} · ${mtd.rev >= paceTarget ? '<span class="delta up">vượt tiến độ ' + usd(mtd.rev - paceTarget) + '</span>' : '<span class="delta down">thiếu ' + usd(paceTarget - mtd.rev) + '</span>'} · Dự phóng cả tháng ${usd(runRate)}` : ''}</div>
+      <h2>Revenue · ${MON[+ym.slice(5) - 1]} ${ym.slice(0, 4)} month-to-date vs target</h2>
+      <div class="big">${usd(mtd.rev)} <span class="of">/ ${usd(goal)}</span></div>
+      <div class="line">Day ${dNow} of ${dIn}: pace target ${usd(pace)} · <b style="color:${mtd.rev >= pace ? 'var(--good-ink)' : 'var(--crit-ink)'}">${mtd.rev >= pace ? 'ahead by' : 'behind by'} ${usd(Math.abs(mtd.rev - pace))}</b> · full-month projection ${usd(proj)}</div>
       <div class="hero-stats">
-        <div><b>${n0(mtd.units)}${ki >= 0 ? ' / ' + n0(k.unit[ki]) : ''}</b><span>Sản phẩm bán / KPI</span></div>
-        <div><b>${n0(mtd.ords)}</b><span>Đơn hàng</span></div>
-        <div><b>${pct(mtd.gpm)}</b><span>Biên LN gộp ước tính${ki >= 0 ? ' · KPI ' + pct(k.gp[ki] / k.rev[ki]) : ''}</span></div>
-        <div><b>${usd(sum(adsIn({ from: ym + '-01', to: M.today }), a => a.spend))}${ki >= 0 ? ' / ' + usd(k.ads[ki]) : ''}</b><span>Chi phí Ads / KPI</span></div>
+        <div><b>${n0(mtd.units)} / ${n0(gUnits)}</b><span>Units sold / target</span></div>
+        <div><b>${usd(mtd.net)}</b><span>Net revenue</span></div>
+        <div><b>${usd(mtd.gp - ads(ym + '-01', M.today).filtered)} / ${usd(gProfit)}</b><span>Profit / target</span></div>
+        <div><b>${n0(mtd.orders)}</b><span>Orders</span></div>
       </div>
     </div>
   </section>
   <div class="grid g-kpi">
-    ${kpi('Doanh thu', usd(cur.rev), (pr ? deltaHtml(cur.rev, prev.rev) + (prev.rev ? ' so với kỳ trước' : '') : 'toàn bộ'), '<span class="pill muted">' + r.days + 'n</span>')}
-    ${kpi('Sản phẩm bán', n0(cur.units), pr ? deltaHtml(cur.units, prev.units) + (prev.units ? ' so với kỳ trước' : '') : '')}
-    ${kpi('Đơn hàng', n0(cur.ords), 'Giá trị TB/đơn ' + usd(cur.aov))}
-    ${kpi('Lợi nhuận gộp ước tính', usd(cur.gp), 'Biên ' + pct(cur.gpm) + ' · sau giá vốn DDP, DDA 2,5%, Co-op 10%')}
-    ${kpi('Chi phí quảng cáo', usd(spend), (pr ? deltaHtml(spend, pAds, true) + ' · ' : '') + 'TACoS ' + pct(tacos, 1))}
-    ${kpi('ROAS (giá bán lẻ)', adSales && spend ? nf1.format(adSales / spend) + '×' : '—', 'Doanh số lẻ từ Ads ' + usd(adSales))}
+    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}${tgt ? ` · ${pct(a.rev / tgt)} of target` : ''}`, 'Wayfair base cost × units (before promotion) — same basis as the KPI "Rev" line.')}
+    ${kpi('Net Revenue', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'What Wayfair actually pays: wholesale price after promotion funding.')}
+    ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()}`)}
+    ${kpi('Orders', n0(a.orders), `${delta(a.orders, b.orders)} ${vsPrev()}`)}
+    ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`, 'Net revenue − platform fee − DDA − COGS (FIFO by PO) − returns − CastleGate fees − ad spend.')}
+    ${kpi('Profit Margin', pct(a.margin, 1), `${delta(a.margin, b.margin, { pp: true })} ${vsPrev()}`, 'Profit ÷ Revenue')}
+    ${kpi('Ad Spend', usd(a.ads), `${delta(a.ads, b.ads, { invert: true })} ${vsPrev()}`)}
+    ${kpi('TACoS', pct(a.tacos, 1), `${delta(a.tacos, b.tacos, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ Revenue')}
   </div>
   <div class="grid g-21">
-    ${card('Doanh thu thực tế so với KPI theo tháng', 'Cột: doanh thu thực (giá Wayfair trả) · Đường đứt: KPI "Rev" sheet Cashflow 26+27', '<div class="chart" id="cKpi"></div><div class="legend"><span><i style="background:var(--s1)"></i>Thực tế</span><span><i class="dash" style="color:var(--s2)"></i>KPI</span></div>', '<div style="display:flex;gap:6px"><button class="view-toggle" id="kpiRange">' + (S.kpiAll ? 'Gần đây' : 'Cả lộ trình') + '</button><button class="view-toggle" data-toggle="kpiTbl">Bảng</button></div>')}
-    ${card('Cảnh báo & việc cần làm', '', `<div class="alerts">${al.join('') || '<div class="empty">Không có cảnh báo</div>'}</div>`)}
+    ${card('Revenue vs target by month', 'Actual revenue (base cost) vs the "Rev" plan in Cashflow 26+27', vbars(shown.map(m => { const i = months.indexOf(m), act = agg(actBy.get(m) || []).rev; return { label: mLabel(m), vs: [act, D.kpi.rev[i]], tip: tipRows(mLabel(m), [['Actual', usd(act), C[0]], ['Target', usd(D.kpi.rev[i]), C[0]], ['Achieved', pct(D.kpi.rev[i] ? act / D.kpi.rev[i] : null)]]) }; }), { fmt: usdK, series: [{ name: 'Actual', color: C[0] }, { name: 'Target', color: C[0], ghost: true }], showVals: false, w: CW('wide'), h: 320 }),
+      { actions: `<button class="view-toggle" data-act="kpiAll" aria-pressed="${S.kpiAll}">${S.kpiAll ? 'To date' : 'Full plan'}</button>` })}
+    ${card('Alerts & actions', '', `<div class="alerts">${alerts}</div>`)}
   </div>
-  <div class="card glass" id="kpiTbl" hidden></div>
+  ${card('Daily revenue, profit and ad spend', 'Profit per day before ad spend is allocated; ad spend shown separately', lines(days.map(dShort), [{ name: 'Revenue', vals: dayPs.map(x => x.rev), color: C[0] }, { name: 'Profit before ads', vals: dayPs.map(x => x.gp), color: C[2] }, { name: 'Ad spend', vals: dayAds, color: C[1], dash: true }], { fmt: usdK, h: 300 }))}
   <div class="grid g-2">
-    ${card('Doanh thu theo ngày', 'Trong khoảng thời gian đã chọn', '<div class="chart" id="cDaily"></div>')}
-    ${card('Doanh thu theo Collection', 'Calix (Kathryn) · Zena (Vivian) · Caroline · Vestra', '<div class="chart" id="cColl"></div>')}
+    ${card('Revenue by collection', '', donut([...byCol].map(([k, ps]) => ({ label: k, v: sum(ps, x => x.rev), color: colColor(k), extra: [['Units', n0(sum(ps, x => x.qty))]] })).sort((x, y) => y.v - x.v), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
+    ${card('Revenue by product type', '', donut([...byType].map(([k, ps], i) => ({ label: k, v: sum(ps, x => x.rev), extra: [['Units', n0(sum(ps, x => x.qty))]] })).sort((x, y) => y.v - x.v), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
   </div>`;
 }
-function afterOverview() {
-  const k = D.kpi || { months: [] };
-  const byM = groupBy(M.orders.filter(o => o.ok && (S.incTT || !o.tt) && (S.channel === 'all' || o.ch === S.channel)), o => o.date.slice(0, 7));
-  const allM = k.months.length ? k.months : [...byM.keys()].sort();
-  const curM = M.today.slice(0, 7), ci = Math.max(0, allM.indexOf(curM));
-  const months = S.kpiAll ? allM : allM.slice(0, Math.max(ci + 3, 4));
-  $('#kpiRange').onclick = () => { S.kpiAll = !S.kpiAll; render(); };
-  const act = months.map(m => m <= M.today.slice(0, 7) ? sum(byM.get(m) || [], o => o.rev) : null);
-  barChart($('#cKpi'), { labels: months.map(mLabel), series: [{ name: 'Thực tế', color: cssv('--s1'), values: act }, { name: 'KPI', color: cssv('--s2'), values: (k.rev || []).slice(0, months.length), type: 'line', dash: true }], fmt: v => usd(v), fmtAxis: usdK, height: 260,
-    extraTip: i => act[i] != null && k.rev && k.rev[i] ? `<div><span>Đạt</span><span>${pct(act[i] / k.rev[i])}</span></div>` : '' });
-  $('#kpiTbl').innerHTML = `<div class="card-head"><div><h3>KPI theo tháng (Cashflow 26+27)</h3></div></div><div class="tbl-wrap"><table><thead><tr><th>Tháng</th><th class="num">Units KPI</th><th class="num">Units thực</th><th class="num">Rev KPI</th><th class="num">Rev thực</th><th class="num">% đạt</th><th class="num">Ads KPI</th><th class="num">GP KPI</th></tr></thead><tbody>${allM.map((m, i) => { const os = byM.get(m) || []; const a = sum(os, o => o.rev); return `<tr><td>${mLabel(m)}</td><td class="num">${n0(k.unit[i])}</td><td class="num">${m <= M.today.slice(0, 7) ? n0(sum(os, o => o.qty)) : '—'}</td><td class="num">${usd(k.rev[i])}</td><td class="num">${m <= M.today.slice(0, 7) ? usd(a) : '—'}</td><td class="num">${m <= M.today.slice(0, 7) && k.rev[i] ? pct(a / k.rev[i]) : '—'}</td><td class="num">${usd(k.ads[i])}</td><td class="num">${usd(k.gp[i])}</td></tr>`; }).join('')}</tbody></table></div>`;
-  const r = range(), days = S.period === 'all' ? dayList({ from: (M.orders[M.orders.length - 1] || {}).date || M.today, to: M.today }) : dayList(r);
-  const os = ordersIn(r.from < '2001' ? { from: days[0], to: M.today } : r), bd = groupBy(os, o => o.date);
-  barChart($('#cDaily'), { labels: days.map(dShort), tipLabels: days.map(dLong), series: [{ name: 'Doanh thu', color: cssv('--s1'), values: days.map(d => sum(bd.get(d) || [], o => o.rev)) }], fmt: v => usd(v), fmtAxis: usdK,
-    extraTip: i => { const x = bd.get(days[i]) || []; return `<div><span>Sản phẩm</span><span>${n0(sum(x, o => o.qty))}</span></div>`; } });
-  const byC = groupBy(os, o => M.prod(o.part).col);
-  donut($('#cColl'), [...byC].map(([k, v]) => ({ k, v: sum(v, o => o.rev), extra: `<div><span>Sản phẩm</span><span>${n0(sum(v, o => o.qty))}</span></div>` })).sort((a, b) => b.v - a.v), v => usd(v));
+function freeInfo(po) {
+  if (!po.recv) return null; const end = addDays(po.recv, 90), left = diffDays(M.today, end), used = diffDays(po.recv, M.today);
+  const recvU = sum(po.items || [], i => i[1]), L = Object.values(M.layers).flat().filter(l => l.po === po.id), remain = sum(L, l => l.left);
+  return { end, left, used, recvU, remain, sold: recvU - remain };
 }
-
-function viewCastleGate() {
-  const cg = cgModel(); const C = SER();
-  const poCards = cg.pos.map(p => {
-    const cls = p.daysLeft <= 14 ? 'crit' : p.daysLeft <= 30 ? 'warn' : 'good';
-    const st = [['Tạo PO', p.created], ['Rời cảng VN', p.loadAtd], ['Cập cảng Mỹ', p.portAta], ['Đến kho', p.whAta], ['Bắt đầu nhận', p.recvStart]];
-    const frac = Math.min(1, Math.max(0, p.elapsed / FREE_DAYS));
-    return `<section class="card glass cg-po">
-      <div class="cg-top"><div><h3>${esc(p.id)} <span class="pill info"><i></i>${esc(p.status)}</span></h3><p class="sub">${esc(p.po || '')} · ${esc(p.dest || '')} · ${p.cbm ? nf1.format(p.cbm) + ' CBM' : ''} ${p.container ? '· ' + esc(p.container) : ''}</p></div>
-        <div style="text-align:right"><div class="cg-days"><b>${Math.max(0, p.daysLeft)}</b><span>ngày miễn phí còn lại</span></div><span class="pill ${cls}"><i></i>Hết miễn phí ${dLong(p.freeEnd)}</span></div></div>
-      <div><div class="free-bar"><i style="width:${(frac * 100).toFixed(1)}%"></i></div><div class="legend-row"><span>Nhận ${dLong(p.recv)}</span><span>Ngày ${Math.min(p.elapsed, 999)}/${FREE_DAYS}</span><span>${dLong(p.freeEnd)}</span></div></div>
-      <div class="timeline">${st.map(([l, d]) => `<div class="st ${d ? 'done' : ''}"><b>${l}</b>${d ? dLong(d) : '—'}</div>`).join('')}</div>
-      <div class="grid g-kpi" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
-        ${kpi('Đã nhận', n0(p.recvUnits), 'sản phẩm')}${kpi('Đã bán (FIFO)', n0(p.recvUnits - p.left), pct((p.recvUnits - p.left) / p.recvUnits) + ' sell-through', '', (p.recvUnits - p.left) / p.recvUnits)}
-        ${kpi('Còn trong kho', n0(p.left), 'giá vốn ' + usd(sum(p.lines, l => l.left * l.cogs)))}${kpi('Dự kiến tồn khi hết hạn', n0(p.projLeft), 'giá vốn ~' + usd(p.projVal) + ' sẽ bắt đầu tính phí kho')}
-      </div>
-      <div class="tbl-wrap"><table><thead><tr><th>SKU</th><th class="num">Nhận</th><th class="num">Đã bán</th><th class="num">Còn</th><th class="num">Bán/ngày (30n)</th><th class="num">Cần bán/ngày</th><th class="num">Dự kiến còn</th><th>Đánh giá</th></tr></thead><tbody>
-      ${p.lines.map(l => { const pr = M.prod(l.part); const risk = l.left === 0 ? ['good', 'Đã bán hết'] : l.projLeft <= 0.5 ? ['good', 'Kịp bán hết'] : l.projLeft / l.left > .5 ? ['crit', 'Cần đẩy mạnh'] : ['warn', 'Theo dõi'];
-        return `<tr><td><div class="sku"><span class="dot" style="background:${colColor(pr.col)}"></span><div><b>${esc(l.part)}</b><small>${esc(pr.col)} ${esc(pr.size)} · ${esc(pr.color)}</small></div></div></td><td class="num">${l.received}</td><td class="num">${l.sold}</td><td class="num"><b>${l.left}</b></td><td class="num">${l.vel ? l.vel.toFixed(2) : '0'}</td><td class="num">${l.need == null ? '—' : l.need.toFixed(2)}</td><td class="num">${Math.round(l.projLeft)}</td><td><span class="pill ${risk[0]}"><i></i>${risk[1]}</span></td></tr>`; }).join('')}
-      </tbody></table></div>
-      <p class="note">Giả định FIFO: hàng nhập trước được bán trước. "Cần bán/ngày" = số còn lại ÷ số ngày miễn phí còn lại. "Dự kiến còn" dùng tốc độ bán 30 ngày gần nhất.</p>
-    </section>`; }).join('');
-  const openCards = cg.open.map(p => `<div class="alert info"><span class="ic">⛴</span><div><b>${esc(p.id)} · ${esc(p.status)} · ${n0(sum(p.items, i => i[1]))} sản phẩm kế hoạch</b><span>${esc(p.po || '')} · tạo ${dLong(p.created)} · hàng sẵn sàng ${dLong(p.ready)} · đến ${esc(p.dest || '—')}${p.eta ? ' · ETA ' + dLong(p.eta) : ''}. Khi nhận vào kho sẽ có thêm 90 ngày miễn phí cho lô này.</span><div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${p.items.filter(i => i[1]).map(i => `<span class="tag">${esc(i[0])} × ${i[1]}</span>`).join('')}</div></div></div>`).join('');
-  const invAll = [...cg.inv.values()].filter(x => x.status === 'ACTIVE' || x.inStock > 0);
-  const inv = invAll.filter(x => S.invAll || x.inStock > 0 || x.onOrder > 0 || (cg.sold30.get(x.part) || 0) > 0).sort((a, b) => b.inStock - a.inStock || a.part.localeCompare(b.part));
-  const totIn = sum(invAll, x => x.inStock), totVal = sum(invAll, x => x.inStock * M.cogsOf(x.part)), totRetail = sum(invAll, x => x.inStock * (x.wholesale || 0));
-  return `
-  <h2 class="section-title">CastleGate · PO nhập kho &amp; 90 ngày miễn phí lưu kho</h2>
-  <p class="section-sub">Ngày vào kho lấy theo mốc "Receiving Start" của Wayfair; hạn miễn phí = ngày nhận + 90 ngày.</p>
-  ${poCards || card('', '', '<div class="empty">Chưa có lô nào đã nhận vào kho</div>')}
-  ${openCards ? card('PO đang trên đường / chờ nhận', '', `<div class="alerts">${openCards}</div>`) : ''}
-  <h2 class="section-title">Tồn kho thực tế (CastleGate)</h2>
-  <div class="grid g-kpi">
-    ${kpi('Tồn kho', n0(totIn), 'sản phẩm trong mạng lưới CastleGate')}
-    ${kpi('Giá trị tồn (giá vốn)', usd(totVal), 'theo COGS DDP')}
-    ${kpi('Giá trị tồn (giá bán Wayfair)', usd(totRetail), 'wholesale')}
-    ${kpi('SKU có hàng', n0(invAll.filter(x => x.inStock > 0).length) + '<small>/ ' + invAll.length + '</small>', 'SKU đang hoạt động')}
-  </div>
-  <div class="grid g-12">
-    ${card('Tồn kho theo Collection', '', '<div class="chart" id="cInvCol"></div>')}
-    ${card('Chi tiết tồn kho theo SKU', 'Days of cover = tồn khả dụng ÷ tốc độ bán 30 ngày', `<div class="tbl-wrap"><table><thead><tr><th>SKU</th><th class="num">Trong kho</th><th class="num">Khả dụng</th><th class="num">Đang về</th><th class="num">Bán 30n</th><th class="num">Days of cover</th><th class="num">Tồn &gt;90n</th><th class="num">Dự báo 3T</th><th>Trạng thái</th></tr></thead><tbody>
-      ${inv.map(x => { const pr = M.prod(x.part), s30 = cg.sold30.get(x.part) || 0, doc = s30 ? x.avail / (s30 / 30) : null;
-        return `<tr><td><div class="sku"><span class="dot" style="background:${colColor(pr.col)}"></span><div><b>${esc(x.part)}</b><small>${esc(pr.col)} ${esc(pr.size)} · ${esc(pr.color)}</small></div></div></td><td class="num"><b>${x.inStock}</b></td><td class="num">${x.avail}</td><td class="num">${x.onOrder || 0}</td><td class="num">${s30}</td><td class="num">${doc == null ? '—' : Math.round(doc) + 'n'}</td><td class="num">${x.aged || 0}</td><td class="num">${x.n3m || 0}</td><td>${x.purch == null ? (x.inStock > 0 ? '<span class="pill good"><i></i>Có hàng</span>' : '<span class="pill muted"><i></i>Hết hàng</span>') : x.purch === 'PURCHASABLE' ? '<span class="pill good"><i></i>Đang bán</span>' : '<span class="pill crit"><i></i>Không mua được</span>'}</td></tr>`; }).join('')}
-    </tbody></table></div>`, `<button class="view-toggle" id="invAll">${S.invAll ? 'Ẩn SKU tồn 0' : 'Hiện tất cả ' + invAll.length + ' SKU'}</button>`)}
-  </div>`;
-}
-const COLL_ORDER = ['Calix', 'Zena', 'Caroline', 'Vestra', 'Khác'];
-function colColor(c) { const i = COLL_ORDER.indexOf(c); return SER()[i < 0 ? 4 : i]; }
-function afterCastleGate() {
-  const ib = $('#invAll'); if (ib) ib.onclick = () => { S.invAll = !S.invAll; render(); };
-  const cg = cgModel(); const byC = new Map();
-  for (const x of cg.inv.values()) { if (!x.inStock) continue; const c = M.prod(x.part).col; byC.set(c, (byC.get(c) || 0) + x.inStock); }
-  const el = $('#cInvCol'); if (el) donut(el, [...byC].map(([k, v]) => ({ k, v, color: colColor(k) })).sort((a, b) => COLL_ORDER.indexOf(a.k) - COLL_ORDER.indexOf(b.k)), n0);
+function buildAlerts(cur) {
+  const out = [];
+  for (const po of M.pos) { const fi = freeInfo(po); if (!fi) continue;
+    const v30 = sum(M.pieces.filter(x => x.ok && x.layer === po.id && x.date > addDays(M.today, -30)), x => x.qty) / 30;
+    const proj = Math.max(0, Math.round(fi.remain - v30 * Math.max(0, fi.left)));
+    const value = sum(Object.values(M.layers).flat().filter(l => l.po === po.id), l => l.left * l.cogs);
+    out.push(`<div class="alert ${fi.left <= 14 ? 'crit' : fi.left <= 45 ? 'warn' : 'info'}"><span class="ic">⏳</span><div><b>${esc(po.id)}: ${fi.left} free-storage days left (until ${dLong(fi.end)})</b><span>${n0(fi.remain)} of ${n0(fi.recvU)} units still in stock (${usd(value)} at landed cost). At the last-30-day pace about ${n0(proj)} units will still be there when fees start.</span></div></div>`); }
+  const tt = M.lines.filter(l => l.tt && l.ok && (S.platform !== 'amz'));
+  if (tt.length) out.push(`<div class="alert info"><span class="ic">★</span><div><b>${new Set(tt.map(l => l.po)).size} Tried &amp; True orders (${n0(sum(tt, l => l.qty))} units)</b><span>${S.incTT ? 'Included in sales figures (filter on).' : 'Excluded from sales and profit by default; their stock cost is shown in Sales → Tried & True.'}</span></div></div>`);
+  const un = M.pieces.filter(x => x.ok && x.layer === 'Unassigned');
+  if (un.length) out.push(`<div class="alert warn"><span class="ic">!</span><div><b>${n0(sum(un, x => x.qty))} units sold beyond the PO quantities on file</b><span>${esc([...new Set(un.map(x => x.part))].join(', '))} — costed at the latest known landed cost. Send the next PO cost sheet to cost these exactly.</span></div></div>`);
+  const d9 = M.P.D9YA; if (d9 && d9.baseListed && d9.baseListed !== d9.base) out.push(`<div class="alert crit"><span class="ic">$</span><div><b>D9YA base cost on Wayfair is $${d9.baseListed} (siblings $${d9.base})</b><span>Orders are paid on a $${d9.base} base, but the listed base cost inflates its Wayfair retail price. Worth correcting in Partner Home.</span></div></div>`);
+  const low = (D.wf.inv || []).filter(r => (r[2] || 0) > 0 && (r[2] || 0) <= 1);
+  if (low.length) out.push(`<div class="alert warn"><span class="ic">↓</span><div><b>${low.length} SKUs down to 1 unit</b><span>${esc(low.map(r => r[0]).join(', '))}</span></div></div>`);
+  return out.join('') || '<div class="empty">No alerts</div>';
 }
 
 function viewSales() {
-  const r = range(); const os = ordersIn(r), a = agg(os); const ttO = ordersIn(r, { tt: true }).filter(o => o.tt);
-  const rows = ordersIn(r, { all: true, tt: true });
-  return `
+  const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
+  const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
+  const bad = basePieces({ includeBad: true }).filter(x => !x.ok && inRange(x, f, t));
+  const days = daysOf(f, t), dayA = byDay(cur.ps, f, t, ps => agg(ps));
+  const grp = (key, fn = x => x[key]) => [...groupBy(cur.ps, fn)].map(([k, ps]) => ({ k, ...agg(ps) }));
+  const bySize = grp('size').sort((x, y) => (x.k ?? 999) - (y.k ?? 999));
+  const skuRows = grp('part').map(r => { const p = M.P[r.k] || {}; return { ...r, part: r.k, col: p.col, size: p.size, color: p.color, type: p.type, share: a.rev ? r.rev / a.rev : 0, promoPct: r.rev ? r.promo / r.rev : 0 }; });
+  const ttL = M.lines.filter(l => l.tt && l.ok && (S.platform === 'all' || l.ch === S.platform) && inRange(l, f, t) && passProd(l.part));
+  const ttPs = M.pieces.filter(x => x.tt && x.ok && (S.platform === 'all' || x.ch === S.platform) && inRange(x, f, t) && passProd(x.part));
+  const ordRows = basePieces({ includeBad: true, ignoreTT: true }).filter(x => inRange(x, f, t)).map(x => ({ ...x }));
+  return `${pageHead('Sales')}
   <div class="grid g-kpi">
-    ${kpi('Doanh thu', usd(a.rev), n0(a.ords) + ' đơn · ' + n0(a.units) + ' sản phẩm')}
-    ${kpi('Giá trị TB/đơn', usd(a.aov), 'wholesale')}
-    ${kpi('Lợi nhuận gộp ước tính', usd(a.gp), 'Biên ' + pct(a.gpm))}
-    ${kpi('Tried &amp; True', n0(ttO.length) + '<small>đơn</small>', usd(sum(ttO, o => o.rev)) + ' · chương trình review mẫu miễn phí')}
+    ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()}`)}
+    ${kpi('Orders', n0(a.orders), `${delta(a.orders, b.orders)} ${vsPrev()}`)}
+    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`, 'Base cost × units')}
+    ${kpi('Net Revenue', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Wholesale price actually paid')}
+    ${kpi('Promotion', usd(a.promo), `${pct(a.rev ? a.promo / a.rev : null, 1)} of revenue · ${delta(a.promo, b.promo, { invert: true })}`, 'Revenue − Net Revenue (Wayfair promotion funding)')}
+    ${kpi('GMV', usd(a.gmv), `${delta(a.gmv, b.gmv)} ${vsPrev()}`, 'Revenue × 2 (estimated consumer spend)')}
+    ${kpi('Avg. Order Value', usd(a.aov), `${delta(a.aov, b.aov)} ${vsPrev()}`, 'Revenue ÷ orders')}
+    ${kpi('Cancelled / Rejected', n0(sum(bad, x => x.qty)) + '<small>units</small>', `${new Set(bad.map(x => x.po)).size} orders`)}
+  </div>
+  ${card('Daily revenue and units', '', `<div class="grid g-2">${vbars(days.map((d, i) => ({ label: dShort(d), v: dayA[i].rev, tip: tipRows(dLong(d), [['Revenue', usd(dayA[i].rev)], ['Net revenue', usd(dayA[i].net)], ['Units', n0(dayA[i].units)], ['Orders', n0(dayA[i].orders)]]) })), { fmt: usdK, showVals: days.length <= 14, w: Math.round(CW('half') - 10) })}${vbars(days.map((d, i) => ({ label: dShort(d), v: dayA[i].units, tip: tipRows(dLong(d), [['Units', n0(dayA[i].units)], ['Orders', n0(dayA[i].orders)]]) })), { fmt: n0, colors: [C[2]], showVals: days.length <= 31, w: Math.round(CW('half') - 10) })}</div>`)}
+  <div class="grid g-2">
+    ${card('By collection', 'Revenue · units on the right', hbars(grp('col').sort((x, y) => y.rev - x.rev).map(r => ({ label: r.k, v: r.rev, sub: n0(r.units) + ' u', color: colColor(r.k), extra: [['Units', n0(r.units)], ['Net revenue', usd(r.net)], ['Share', pct(a.rev ? r.rev / a.rev : 0, 1)]] })), { fmt: usd }))}
+    ${card('By product type', 'Single · Double · Floating · Rolling Cart', donut(grp('type').sort((x, y) => y.rev - x.rev).map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: n0(a.units), sub: 'units' }))}
+    ${card('By size', 'Units sold per vanity width', vbars(bySize.map(r => ({ label: r.k ? sizeLbl(r.k) : 'Cart', v: r.units, tip: tipRows(r.k ? sizeLbl(r.k) : 'Rolling cart', [['Units', n0(r.units)], ['Revenue', usd(r.rev)], ['Type', r.k ? (r.k >= 60 ? 'Double' : r.k <= 30 ? 'Floating · single' : 'Single') : 'Rolling Cart']]) })), { fmt: n0, colors: [C[0]] }))}
+    ${card('By color', '', donut(grp('color', x => x.color || 'No color (cart)').sort((x, y) => y.units - x.units).map(r => ({ label: r.k, v: r.units, extra: [['Revenue', usd(r.rev)]] })), { center: n0(a.units), sub: 'units' }))}
+    ${card('By category', 'Bathroom Vanity · Rolling Cart', donut(grp('cat').map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
+    ${card('Tried &amp; True (review samples)', `${S.incTT ? 'Included' : 'Excluded'} in sales figures · toggle in Filters`, ttL.length ? `<div class="grid g-kpi" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+        <div><div class="sub">Orders</div><b style="font-size:22px">${new Set(ttL.map(l => l.po)).size}</b></div><div><div class="sub">Units</div><b style="font-size:22px">${n0(sum(ttL, l => l.qty))}</b></div><div><div class="sub">Landed cost</div><b style="font-size:22px">${usd(sum(ttPs, x => x.cogs))}</b></div></div>
+        ${table('tt', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'qty', l: 'Units', num: true }, { k: 'state', l: 'State' }], ttL, { def: { k: 'date', d: 'desc' } })}` : '<div class="empty">No Tried &amp; True orders in this period</div>')}
+  </div>
+  ${card('SKU performance', 'Click a column to sort', table('skus', [
+    { k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'col', l: 'Collection' }, { k: 'size', l: 'Size', f: v => sizeLbl(v), sv: r => r.size || 0 }, { k: 'color', l: 'Color' }, { k: 'type', l: 'Type' },
+    { k: 'units', l: 'Units', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true, f: v => n0(v) }, { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, { k: 'net', l: 'Net Revenue', num: true, f: v => usd(v) }, { k: 'promoPct', l: 'Promo %', num: true, f: v => pct(v, 1) },
+    { k: 'share', l: 'Share', num: true, f: v => `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(v * 60)}px"></span>` }], skuRows, { def: { k: 'rev', d: 'desc' }, foot: { part: 'Total', units: a.units, orders: a.orders, rev: a.rev, net: a.net, promoPct: a.rev ? a.promo / a.rev : 0, share: 1 } }))}
+  ${card('Orders', `${n0(new Set(ordRows.map(x => x.po)).size)} orders in this period`, table('orders', [
+    { k: 'date', l: 'Date', f: (v, r) => dLong(v) + (r.hour != null ? ` <span class="sub">${String(r.hour).padStart(2, '0')}:00 ET</span>` : '') }, { k: 'po', l: 'PO', f: (v, r) => `<b>${esc(v)}</b> ${r.tt ? '<span class="tag tt">Tried &amp; True</span>' : ''}${r.country === 'CA' ? ' <span class="tag ca">Canada</span>' : ''}${r.b2b ? ' <span class="tag">B2B</span>' : ''}` },
+    { k: 'ch', l: 'Platform', f: v => v === 'wf' ? 'Wayfair' : 'Amazon' }, { k: 'part', l: 'SKU' }, { k: 'qty', l: 'Units', num: true }, { k: 'base', l: 'Base cost', num: true, f: v => usd(v, 2) }, { k: 'price', l: 'Paid', num: true, f: v => usd(v, 2) },
+    { k: 'promo', l: 'Promo', num: true, f: (v, r) => r.ok ? pct(r.base ? 1 - r.price / r.base : 0) : '—' }, { k: 'state', l: 'State' }, { k: 'layer', l: 'PO layer' }, { k: 'status', l: 'Status', f: (v, r) => r.ok ? esc(v) : `<span class="tag bad">${esc(v)}</span>` }], ordRows, { def: { k: 'date', d: 'desc' } }))}`;
+}
+
+function viewProfit() {
+  const [f, t] = range(), [pf, pt] = prevRange(), C = SER(), A = M.A;
+  const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
+  const steps = [{ label: 'Revenue', v: a.rev, kind: 'total' }, { label: 'Promotion', v: a.promo }, { label: 'Platform fee', v: a.fee }, { label: 'DDA', v: a.dda }, { label: 'COGS (landed)', v: a.cogs }, { label: 'Returns', v: a.ret }, { label: 'CastleGate fees', v: a.cg }, { label: 'Ad spend', v: a.ads }, { label: 'Profit', v: a.profit, kind: 'total' }].map(s => ({ ...s, share: a.rev ? s.v / a.rev : null }));
+  const byPart = [...groupBy(cur.ps, x => x.part)].map(([part, ps]) => { const g = agg(ps), adsP = cur.ad.byPart[part] || 0, p = M.P[part] || {}; const profit = g.gp - adsP;
+    return { part, col: p.col, layers: [...new Set(ps.map(x => x.layer))].join(', '), units: g.units, rev: g.rev, promo: g.promo, net: g.net, fee: g.fee, dda: g.dda, cogs: g.cogs, unitCogs: g.units ? g.cogs / g.units : 0, ret: g.ret, cg: g.cg, ads: adsP, profit, margin: g.rev ? profit / g.rev : null, perUnit: g.units ? profit / g.units : 0 }; });
+  // ad spend on SKUs with no sales in the period (kept so totals reconcile)
+  const soldParts = new Set(byPart.map(r => r.part)); const idle = sum(Object.entries(cur.ad.byPart).filter(([p]) => !soldParts.has(p) && passProd(p)), ([, v]) => v) + (prodFilterOn() || S.f.po.size ? 0 : cur.ad.unalloc);
+  if (idle > 0.5) byPart.push({ part: 'Ads on SKUs with no sales', col: '', layers: '', units: 0, rev: 0, promo: 0, net: 0, fee: 0, dda: 0, cogs: 0, ret: 0, cg: 0, ads: idle, profit: -idle, margin: null, perUnit: 0, idle: true });
+  const byCol = [...groupBy(byPart.filter(r => r.col), r => r.col)].map(([k, rs]) => ({ k, rev: sum(rs, r => r.rev), profit: sum(rs, r => r.profit) }));
+  const byType = [...groupBy(cur.ps, x => x.type)].map(([k, ps]) => { const g = agg(ps), ad = sum([...new Set(ps.map(x => x.part))], p => cur.ad.byPart[p] || 0); return { k, rev: g.rev, profit: g.gp - ad }; });
+  const fifo = []; for (const [part, L] of Object.entries(M.layers)) for (const l of L) if ((!S.f.po.size || S.f.po.has(l.po)) && passProd(part)) fifo.push({ part, po: l.po, recv: l.recv, qty: l.qty, sold: l.qty - l.left, left: l.left, fob: l.fob, cogs: l.cogs, value: l.left * l.cogs, st: l.qty ? (l.qty - l.left) / l.qty : 0 });
+  const money = v => usd(v), m2 = v => usd(v, 2);
+  return `${pageHead('Profit')}
+  <div class="grid g-kpi">
+    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`)}
+    ${kpi('Net Revenue', usd(a.net), `after ${usd(a.promo)} promotion`)}
+    ${kpi('COGS (landed, FIFO)', usd(a.cogs), `${pct(a.rev ? a.cogs / a.rev : null, 1)} of revenue · FOB ${usd(a.fob)}`, 'Landed cost per unit from the PO shipment cost sheet, consumed first-in-first-out by PO.')}
+    ${kpi('Platform fee + DDA', usd(a.fee + a.dda), `${pct(A.platformFee)} + ${pct(A.dda, 1)} of net revenue`, 'Wayfair Co-op (platform fee) 10% and Damage/Defect Allowance 2.5% of net revenue, per the PO cost sheet.')}
+    ${kpi('Ad Spend', usd(a.ads), `TACoS ${pct(a.tacos, 1)} · ${delta(a.ads, b.ads, { invert: true })}`)}
+    ${kpi('Total Costs', usd(a.costs), `${pct(a.rev ? a.costs / a.rev : null, 1)} of revenue`, 'Everything between Revenue and Profit, incl. promotion.')}
+    ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`)}
+    ${kpi('Profit Margin', pct(a.margin, 1), `${delta(a.margin, b.margin, { pp: true })} ${vsPrev()}`, 'Profit ÷ Revenue')}
+  </div>
+  ${card('Revenue to profit', 'Where each dollar of revenue goes in this period (hover for % of revenue)', waterfall(steps))}
+  ${card('Profit by SKU', 'COGS uses the PO layer(s) each unit came from · ad spend by Wayfair listing (SKU report), split across child SKUs by net revenue', table('psku', [
+    { k: 'part', l: 'SKU', f: (v, r) => r.idle ? `<i class="sub">${esc(v)}</i>` : skuCell(v) }, { k: 'units', l: 'Units', num: true, f: v => n0(v) }, { k: 'rev', l: 'Revenue', num: true, f: money },
+    { k: 'profit', l: 'Profit', num: true, neg: true, f: v => `<b>${usd(v)}</b>` }, { k: 'margin', l: 'Margin', num: true, neg: true, f: v => pct(v, 1) }, { k: 'perUnit', l: 'Profit / unit', num: true, neg: true, f: m2 },
+    { k: 'promo', l: 'Promotion', num: true, f: money }, { k: 'net', l: 'Net Rev.', num: true, f: money }, { k: 'fee', l: 'Platform fee', num: true, f: money }, { k: 'dda', l: 'DDA', num: true, f: money },
+    { k: 'cogs', l: 'COGS', num: true, f: money }, { k: 'unitCogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'ret', l: 'Returns', num: true, f: money }, { k: 'cg', l: 'CastleGate', num: true, f: money }, { k: 'ads', l: 'Ads', num: true, f: money }, { k: 'layers', l: 'PO layer' }], byPart,
+    { def: { k: 'profit', d: 'desc' }, foot: { part: 'Total', layers: '', units: a.units, rev: a.rev, promo: a.promo, net: a.net, fee: a.fee, dda: a.dda, cogs: a.cogs, unitCogs: a.units ? a.cogs / a.units : 0, ret: a.ret, cg: a.cg, ads: a.ads, profit: a.profit, margin: a.margin, perUnit: a.units ? a.profit / a.units : 0 } }))}
+  <div class="grid g-2">
+    ${card('Profit margin by collection', 'Profit ÷ revenue · red = loss after ads', hbars(byCol.filter(r => r.rev).sort((x, y) => y.profit / y.rev - x.profit / x.rev).map(r => ({ label: r.k, v: r.profit / r.rev, sub: usd(r.profit), color: colColor(r.k), extra: [['Revenue', usd(r.rev)], ['Profit', usd(r.profit)]] })), { fmt: v => pct(v, 1) }))}
+    ${card('Profit by product type', '', hbars(byType.sort((x, y) => y.profit - x.profit).map(r => ({ label: r.k, v: r.profit, sub: pct(r.rev ? r.profit / r.rev : null), extra: [['Revenue', usd(r.rev)], ['Margin', pct(r.rev ? r.profit / r.rev : null, 1)]] })), { fmt: usd, color: C[2] }))}
+  </div>
+  ${card('FIFO cost layers', 'Each PO shipment is a cost layer; units sell from the oldest layer first, then the next PO. All-time, not limited to the date range.', table('fifo', [
+    { k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'po', l: 'PO' }, { k: 'recv', l: 'Received', f: v => dLong(v) }, { k: 'qty', l: 'Qty in', num: true }, { k: 'sold', l: 'Sold', num: true }, { k: 'left', l: 'Remaining', num: true }, { k: 'st', l: 'Sell-through', num: true, f: v => `${pct(v)}<span class="mini-bar" style="width:${Math.round(v * 50)}px"></span>` },
+    { k: 'fob', l: 'FOB / unit', num: true, f: m2 }, { k: 'cogs', l: 'Landed / unit', num: true, f: m2 }, { k: 'value', l: 'Stock value', num: true, f: money }], fifo, { def: { k: 'value', d: 'desc' } }))}
+  ${card('Cost assumptions', 'Change any rate here by sending the new figure — the model recalculates every metric', `<div class="assump">
+      <div><span>Revenue</span><b>Base cost × units</b></div><div><span>Net revenue</span><b>Wholesale price paid</b></div><div><span>Promotion</span><b>Revenue − Net revenue</b></div><div><span>GMV</span><b>Revenue × 2</b></div>
+      <div><span>Platform fee (Wayfair Co-op)</span><b>${pct(A.platformFee, 1)} of net rev.</b></div><div><span>DDA (damage allowance)</span><b>${pct(A.dda, 1)} of net rev.</b></div><div><span>Returns provision</span><b>${pct(A.returns, 1)} of revenue</b></div><div><span>CastleGate fees</span><b>${pct(A.castlegate, 1)} of revenue</b></div>
+      <div><span>COGS</span><b>Landed cost by PO, FIFO</b></div><div><span>Ad spend by SKU</span><b>Listing spend × net-revenue share</b></div><div><span>Profit margin</span><b>Profit ÷ Revenue</b></div><div><span>TACoS</span><b>Ad spend ÷ Revenue</b></div></div>
+      <p class="note">Returns and CastleGate fees use the Cashflow 26+27 plan rates until actual return and fee data are available from Wayfair. Each future PO (2nd, 3rd shipment…) is its own cost layer with its own factory FOB and freight, so a container that cost more only affects the units that came in on it.</p>`)}`;
+}
+
+function viewCustomers() {
+  const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
+  const cur = period(f, t), ps = cur.ps, a = cur.a;
+  const st = {}; for (const x of ps) { const k = x.country === 'CA' ? 'CA-' + x.state : x.state; const s = st[k] = st[k] || { code: x.state, country: x.country, units: 0, rev: 0, net: 0, orders: new Set() }; s.units += x.qty; s.rev += x.rev; s.net += x.net; s.orders.add(x.po); }
+  const rows = Object.entries(st).map(([k, s]) => { const info = s.country === 'CA' ? [CA_PROV[s.code] || s.code, 'Canada', '—'] : (STATES[s.code] || [s.code, '', '']); return { k, code: s.code, name: info[0], region: info[1], coast: info[2], country: s.country, units: s.units, rev: s.rev, net: s.net, orders: s.orders.size, share: a.rev ? s.rev / a.rev : 0 }; });
+  const usStats = {}; for (const r of rows) if (r.country !== 'CA') usStats[r.code] = r;
+  const coast = [...groupBy(rows, r => r.country === 'CA' ? 'Canada' : r.coast.replace(' (Gulf)', ''))].map(([k, rs]) => ({ label: k, v: sum(rs, r => r.rev), extra: [['Units', n0(sum(rs, r => r.units))], ['States', n0(rs.length)]] }));
+  const region = [...groupBy(rows, r => r.region)].map(([k, rs]) => ({ label: k, v: sum(rs, r => r.rev), sub: n0(sum(rs, r => r.units)) + ' u' })).sort((x, y) => y.v - x.v);
+  const timed = ps.filter(x => x.hour != null), hours = Array.from({ length: 24 }, (_, h) => timed.filter(x => x.hour === h)), dows = DOW.map((_, i) => timed.filter(x => x.dow === i));
+  const ordersOf = arr => new Set(arr.map(x => x.po)).size;
+  const peakH = hours.map((h, i) => [ordersOf(h), i]).sort((x, y) => y[0] - x[0])[0];
+  const top = rows.filter(r => r.country !== 'CA').sort((x, y) => y.rev - x.rev)[0];
+  const share = k => a.rev ? sum(rows.filter(r => r.coast === k), r => r.rev) / a.rev : null;
+  const ca = rows.filter(r => r.country === 'CA'), b2b = ps.filter(x => x.b2b);
+  if (!US) loadMap();
+  return `${pageHead('Customers')}
+  <div class="grid g-kpi k3">
+    ${kpi('States reached', n0(Object.keys(usStats).length) + '<small>/ 50</small>', ca.length ? `+ ${ca.length} Canadian provinces` : 'US only')}
+    ${kpi('Top state', top ? esc(top.code) : '—', top ? `${esc(top.name)} · ${usd(top.rev)}` : '')}
+    ${kpi('East Coast share', pct(share('East Coast')), 'of revenue')}
+    ${kpi('West Coast share', pct(share('West Coast')), 'of revenue')}
+    ${kpi('Peak order hour', peakH && peakH[0] ? `${String(peakH[1]).padStart(2, '0')}:00<small>ET</small>` : '—', timed.length ? `${n0(peakH[0])} orders in that hour` : 'needs order timestamps')}
+    ${kpi('B2B orders', n0(ordersOf(b2b)), `${pct(a.rev ? sum(b2b, x => x.rev) / a.rev : null)} of revenue · Wayfair Professional`)}
+  </div>
+  ${card('Where customers buy', 'Revenue by US state — darker = more revenue · hover a state for units and revenue', usMap(usStats))}
+  <div class="grid g-21">
+    ${card('States ranked', 'Region = US Census region · Coast = Atlantic (East) or Pacific (West) coastline', table('states', [
+      { k: 'name', l: 'State', f: (v, r) => `<b>${esc(v)}</b> <span class="sub">${esc(r.code)}</span>` }, { k: 'region', l: 'Region' }, { k: 'coast', l: 'Coast', f: v => v === 'East Coast' || v === 'West Coast' ? `<span class="tag">${esc(v)}</span>` : esc(v) },
+      { k: 'orders', l: 'Orders', num: true }, { k: 'units', l: 'Units', num: true }, { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, { k: 'share', l: 'Share', num: true, f: v => `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(v * 80)}px"></span>` }], rows, { def: { k: 'rev', d: 'desc' } }))}
+    <div class="grid">
+      ${card('By coast', 'Share of revenue', hbars(coast.sort((x, y) => y.v - x.v).map(c => ({ ...c, sub: pct(a.rev ? c.v / a.rev : 0) })), { fmt: usd }))}
+      ${card('By region', '', hbars(region, { fmt: usd }))}
+    </div>
   </div>
   <div class="grid g-2">
-    ${card('Theo Collection', 'Doanh thu', '<div class="chart" id="sCol"></div>')}
-    ${card('Theo Category', 'Doanh thu', '<div class="chart" id="sCat"></div>')}
-    ${card('Theo kích thước (Size)', 'Sản phẩm bán', '<div id="sSize"></div>')}
-    ${card('Theo màu (Color)', 'Sản phẩm bán', '<div class="chart" id="sColor"></div>')}
-  </div>
-  <div class="grid g-21">
-    ${card('Hiệu quả từng SKU', 'Xếp theo doanh thu trong kỳ', `<div class="tbl-wrap"><table><thead><tr><th>SKU</th><th>Collection</th><th>Size</th><th>Màu</th><th>Category</th><th class="num">SL</th><th class="num">Doanh thu</th><th class="num">Giá TB</th><th class="num">LN gộp</th><th class="num">Biên</th></tr></thead><tbody id="skuBody"></tbody></table></div>`)}
-    ${card('Theo bang (Mỹ/Canada)', 'Sản phẩm bán', '<div id="sState"></div>')}
-  </div>
-  ${card('Danh sách đơn hàng', 'Đơn có nhãn <span class="tag tt">Tried &amp; True</span> là đơn của chương trình review for free sample (cột Sales Channel)', `<div class="tbl-wrap"><table><thead><tr><th>Ngày</th><th>Kênh</th><th>PO</th><th>SKU</th><th>Sản phẩm</th><th class="num">SL</th><th class="num">Giá</th><th>Trạng thái</th><th>Bang</th><th>Ghi chú</th></tr></thead><tbody>
-    ${rows.map(o => { const pr = M.prod(o.part); return `<tr><td>${dLong(o.date)}</td><td>${o.ch === 'wf' ? (o.retailer || 'Wayfair') : 'Amazon'}</td><td>${esc(o.po)}</td><td><b>${esc(o.part)}</b></td><td><small>${esc(pr.col)} ${esc(pr.size)} · ${esc(pr.color)}</small></td><td class="num">${o.qty}</td><td class="num">${usd(o.price, 2)}</td><td>${o.ok ? esc(o.status) : '<span class="pill crit"><i></i>' + esc(o.status) + '</span>'}</td><td>${esc(o.state || '')}</td><td>${o.tt ? '<span class="tag tt">Tried &amp; True</span> ' : ''}${o.retailer === 'Wayfair.ca' ? '<span class="tag ca">Canada</span> ' : ''}${o.b2b ? '<span class="tag">B2B</span>' : ''}</td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">Không có đơn trong kỳ</td></tr>'}
-  </tbody></table></div>`)}`;
-}
-function afterSales() {
-  const r = range(), os = ordersIn(r);
-  const by = f => [...groupBy(os, f)].map(([k, v]) => ({ k, v: sum(v, o => o.rev), u: sum(v, o => o.qty) }));
-  donut($('#sCol'), by(o => M.prod(o.part).col).map(x => ({ ...x, color: colColor(x.k) })).sort((a, b) => b.v - a.v), v => usd(v));
-  donut($('#sCat'), by(o => M.prod(o.part).cat).sort((a, b) => b.v - a.v), v => usd(v));
-  const sizes = by(o => { const p = M.prod(o.part); return p.col + ' ' + p.size; }).sort((a, b) => b.u - a.u);
-  $('#sSize').innerHTML = hbars(sizes.map(x => ({ k: x.k, v: x.u, color: colColor(x.k.split(' ')[0]) })), n0);
-  donut($('#sColor'), by(o => M.prod(o.part).color).map(x => ({ k: x.k, v: x.u })).sort((a, b) => b.v - a.v), n0);
-  const st = [...groupBy(os, o => (o.state || '—') + (o.retailer === 'Wayfair.ca' ? ' (CA)' : ''))].map(([k, v]) => ({ k, v: sum(v, o => o.qty) })).sort((a, b) => b.v - a.v).slice(0, 12);
-  $('#sState').innerHTML = hbars(st, n0, cssv('--s1'));
-  const sk = [...groupBy(os, o => o.part)].map(([k, v]) => ({ part: k, p: M.prod(k), u: sum(v, o => o.qty), rev: sum(v, o => o.rev), gp: sum(v, o => o.gp) })).sort((a, b) => b.rev - a.rev);
-  $('#skuBody').innerHTML = sk.map(x => `<tr><td><div class="sku"><span class="dot" style="background:${colColor(x.p.col)}"></span><b>${esc(x.part)}</b></div></td><td>${esc(x.p.col)}</td><td>${esc(x.p.size)}</td><td>${esc(x.p.color)}</td><td>${esc(x.p.cat)}</td><td class="num">${x.u}</td><td class="num"><b>${usd(x.rev)}</b></td><td class="num">${usd(x.rev / x.u, 2)}</td><td class="num">${usd(x.gp)}</td><td class="num">${pct(x.rev ? x.gp / x.rev : null)}</td></tr>`).join('') || '<tr><td colspan="10" class="empty">Không có dữ liệu</td></tr>';
+    ${card('Orders by hour of day', 'US Eastern time (Wayfair order timestamp)', timed.length ? vbars(hours.map((h, i) => ({ label: String(i), v: ordersOf(h), tip: tipRows(`${String(i).padStart(2, '0')}:00–${String(i).padStart(2, '0')}:59 ET`, [['Orders', n0(ordersOf(h))], ['Units', n0(sum(h, x => x.qty))], ['Revenue', usd(sum(h, x => x.rev))]]) })), { fmt: n0, colors: [C[0]], showVals: true }) + '<p class="note">0 = midnight, 12 = noon, 20 = 8 pm Eastern.</p>' : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
+    ${card('Orders by day of week', 'US Eastern time', timed.length ? vbars(dows.map((d, i) => ({ label: DOW[i], v: ordersOf(d), tip: tipRows(DOW[i], [['Orders', n0(ordersOf(d))], ['Units', n0(sum(d, x => x.qty))], ['Revenue', usd(sum(d, x => x.rev))]]) })), { fmt: n0, colors: [C[2]] }) : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
+  </div>`;
 }
 
 function viewAds() {
-  const r = range(), pr = prevRange(r);
-  const wf = M.wfAds.filter(a => inR(a.date, r)), am = M.amAds.filter(a => inR(a.date, r));
-  const s = x => ({ spend: sum(x, a => a.spend), sales: sum(x, a => a.sales), clicks: sum(x, a => a.clicks), impr: sum(x, a => a.impr), orders: sum(x, a => a.orders) });
-  const W = s(wf), A = s(am), rev = agg(ordersIn(r)).rev;
-  const wallet = D.wf && D.wf.ads && D.wf.ads.wallet;
-  const amC = (D.amz && D.amz.ads && D.amz.ads.camps) || [];
-  const byCamp = [...groupBy(wf, a => a.camp)].map(([id, x]) => ({ id, c: M.camps.get(id) || { name: id }, ...s(x) })).sort((a, b) => b.spend - a.spend);
-  return `
+  const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
+  const cur = period(f, t), prev = period(pf, pt), ad = cur.ad, pa = prev.ad, a = cur.a;
+  const roas = ad.spend ? ad.sales / ad.spend : null, proas = pa.spend ? pa.sales / pa.spend : null;
+  const days = daysOf(f, t), dd = days.map(d => ad.daily.get(d) || { spend: 0, sales: 0, clicks: 0, impr: 0 });
+  const meta = new Map(((D.wf.ads && D.wf.ads.camps) || []).map(c => [c[0], c]));
+  const camps = [...ad.camps.values()].map(c => { const m = meta.get(c.id) || []; return { ...c, name: m[1] || c.id, status: m[2], cap: m[5], ctr: c.impr ? c.clicks / c.impr : null, cpc: c.clicks ? c.spend / c.clicks : null, roas: c.spend ? c.sales / c.spend : null, acos: c.sales ? c.spend / c.sales : null }; });
+  const listings = Object.entries(ad.byListing).map(([lid, x]) => { const kids = M.listingParts[lid] || []; const p = M.P[kids[0]] || {}; return { lid, name: (p.name || lid).replace(/ with .*/i, ''), col: p.col, ...x, roas: x.spend ? x.sales / x.spend : null, alloc: kids.filter(k => ad.byPart[k] > 0.005).map(k => `${k} ${usd(ad.byPart[k])}`).join(' · ') }; });
+  const amzNote = S.platform === 'amz' ? '<p class="note">Amazon Ads data starts once the Amazon Ads API application is approved (submitted Nov 13).</p>' : '';
+  return `${pageHead('Advertising')}
   <div class="grid g-kpi">
-    ${kpi('Chi phí Ads Wayfair', usd(W.spend, 2), 'Ví còn ' + (wallet && wallet.balance != null ? usd(wallet.balance, 2) : '—'))}
-    ${kpi('ROAS Wayfair', W.spend ? nf1.format(W.sales / W.spend) + '×' : '—', 'Doanh số lẻ quy cho Ads ' + usd(W.sales))}
-    ${kpi('CPC · CTR', W.clicks ? usd(W.spend / W.clicks, 2) : '—', 'CTR ' + pct(W.impr ? W.clicks / W.impr : null, 2) + ' · ' + n0(W.clicks) + ' click')}
-    ${kpi('TACoS', pct(rev ? (W.spend + A.spend) / rev : null, 1), 'Tổng Ads ÷ doanh thu (wholesale)')}
-    ${kpi('Chi phí Ads Amazon', usd(A.spend, 2), n0(A.clicks) + ' click · ' + n0(A.orders) + ' đơn')}
+    ${kpi('Ad Spend', usd(ad.spend, 0), `${delta(ad.spend, pa.spend, { invert: true })} ${vsPrev()}`)}
+    ${kpi('Ad Sales', usd(ad.sales), `${delta(ad.sales, pa.sales)} 14-day attributed, retail price`, 'Retail sales Wayfair attributes to ad clicks/views within 14 days.')}
+    ${kpi('ROAS', roas == null ? '—' : roas.toFixed(1) + '×', `${delta(roas, proas)} ${vsPrev()}`, 'Ad sales ÷ ad spend')}
+    ${kpi('ACoS', pct(ad.sales ? ad.spend / ad.sales : null, 1), 'Ad spend ÷ ad sales')}
+    ${kpi('TACoS', pct(a.rev ? ad.spend / a.rev : null, 1), `${delta(a.rev ? ad.spend / a.rev : null, prev.a.rev ? pa.spend / prev.a.rev : null, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ total Revenue (base cost)')}
+    ${kpi('Clicks', n0(ad.clicks), `CTR ${pct(ad.impr ? ad.clicks / ad.impr : null, 2)} · ${n0(ad.impr)} impressions`)}
+    ${kpi('CPC', ad.clicks ? usd(ad.spend / ad.clicks, 2) : '—', `${delta(ad.clicks ? ad.spend / ad.clicks : null, pa.clicks ? pa.spend / pa.clicks : null, { invert: true })} ${vsPrev()}`)}
+    ${kpi('Ad Orders', n0(ad.orders), `${n0(ad.units)} units attributed`)}
   </div>
+  ${amzNote}
   <div class="grid g-2">
-    ${card('Chi phí quảng cáo theo ngày', 'Wayfair và Amazon', '<div class="chart" id="aSpend"></div><div class="legend"><span><i style="background:var(--s1)"></i>Wayfair</span><span><i style="background:var(--s2)"></i>Amazon</span></div>')}
-    ${card('Doanh số lẻ quy cho Ads (Wayfair)', 'Attributed retail sales, cửa sổ 14 ngày', '<div class="chart" id="aSales"></div>')}
+    ${card('Daily ad spend', '', vbars(days.map((d, i) => ({ label: dShort(d), v: dd[i].spend, tip: tipRows(dLong(d), [['Spend', usd(dd[i].spend, 2)], ['Clicks', n0(dd[i].clicks)], ['Impressions', n0(dd[i].impr)]]) })), { fmt: v => usd(v), colors: [C[1]], showVals: days.length <= 14, w: CW('half') }))}
+    ${card('Daily attributed ad sales', 'Retail value, 14-day window', vbars(days.map((d, i) => ({ label: dShort(d), v: dd[i].sales, tip: tipRows(dLong(d), [['Ad sales', usd(dd[i].sales)], ['Spend', usd(dd[i].spend, 2)], ['ROAS', dd[i].spend ? (dd[i].sales / dd[i].spend).toFixed(1) + '×' : '—']]) })), { fmt: usdK, colors: [C[2]], showVals: days.length <= 14, w: CW('half') }))}
   </div>
-  ${card('Chiến dịch Wayfair', '', `<div class="tbl-wrap"><table><thead><tr><th>Chiến dịch</th><th>Bắt đầu</th><th class="num">Ngân sách/ngày</th><th class="num">Hiển thị</th><th class="num">Click</th><th class="num">CTR</th><th class="num">CPC</th><th class="num">Chi phí</th><th class="num">Đơn</th><th class="num">Doanh số lẻ</th><th class="num">ROAS</th></tr></thead><tbody>
-    ${byCamp.map(x => `<tr><td><b>${esc(x.c.name)}</b></td><td>${dLong(x.c.start)}</td><td class="num">${x.c.cap ? usd(x.c.cap) : '—'}</td><td class="num">${n0(x.impr)}</td><td class="num">${n0(x.clicks)}</td><td class="num">${pct(x.impr ? x.clicks / x.impr : null, 2)}</td><td class="num">${x.clicks ? usd(x.spend / x.clicks, 2) : '—'}</td><td class="num"><b>${usd(x.spend, 2)}</b></td><td class="num">${n0(x.orders)}</td><td class="num">${usd(x.sales)}</td><td class="num">${x.spend ? nf1.format(x.sales / x.spend) + '×' : '—'}</td></tr>`).join('') || '<tr><td colspan="11" class="empty">Không có dữ liệu</td></tr>'}
-  </tbody></table></div>`)}
-  ${card('Chiến dịch Amazon (Sponsored Products)', '30 ngày gần nhất theo Amazon Ads', `<div class="tbl-wrap"><table><thead><tr><th>Chiến dịch</th><th>Trạng thái</th><th>Bắt đầu</th><th class="num">Ngân sách/ngày</th><th class="num">Click</th><th class="num">Chi phí</th><th class="num">Doanh số</th><th class="num">Đơn</th></tr></thead><tbody>
-    ${amC.map(c => `<tr><td><b>${esc(c[1])}</b></td><td>${/PAYMENT/i.test(c[3] || '') ? '<span class="pill crit"><i></i>Lỗi thanh toán</span>' : '<span class="pill muted"><i></i>' + esc(c[3] || c[2]) + '</span>'}</td><td>${dLong(c[4])}</td><td class="num">${usd(c[5] || 0)}</td><td class="num">${n0(c[7])}</td><td class="num">${usd(c[8] || 0, 2)}</td><td class="num">${usd(c[9] || 0)}</td><td class="num">${n0(c[10])}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có dữ liệu Amazon Ads</td></tr>'}
-  </tbody></table></div>`)}`;
-}
-function afterAds() {
-  const r = range(); const first = [...M.wfAds, ...M.amAds].map(a => a.date).sort()[0] || M.today;
-  const days = dayList(S.period === 'all' ? { from: first, to: M.today } : r);
-  const w = groupBy(M.wfAds, a => a.date), a = groupBy(M.amAds, x => x.date);
-  barChart($('#aSpend'), { labels: days.map(dShort), tipLabels: days.map(dLong), series: [{ name: 'Wayfair', color: cssv('--s1'), values: days.map(d => sum(w.get(d) || [], x => x.spend)) }, { name: 'Amazon', color: cssv('--s2'), values: days.map(d => sum(a.get(d) || [], x => x.spend)) }], fmt: v => usd(v, 2), fmtAxis: v => '$' + v });
-  barChart($('#aSales'), { labels: days.map(dShort), tipLabels: days.map(dLong), series: [{ name: 'Doanh số lẻ', color: cssv('--s3'), values: days.map(d => sum(w.get(d) || [], x => x.sales)) }], fmt: v => usd(v), fmtAxis: usdK,
-    extraTip: i => { const x = w.get(days[i]) || [], sp = sum(x, y => y.spend), sl = sum(x, y => y.sales); return `<div><span>Chi phí</span><span>${usd(sp, 2)}</span></div><div><span>ROAS</span><span>${sp ? nf1.format(sl / sp) + '×' : '—'}</span></div>`; } });
+  ${card('Campaigns', '', table('camps', [{ k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.id)} · ${esc(r.status || '')}${r.cap ? ' · $' + r.cap + '/day cap' : ''}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: v => n0(v) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }], camps, { def: { k: 'spend', d: 'desc' } }))}
+  ${card('Spend by listing → SKU', 'From the Wayfair SKU report; each listing\'s spend is split across its child SKUs by net revenue (equal split if the listing had no sales)', listings.length ? table('lst', [{ k: 'name', l: 'Listing', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.lid)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'alloc', l: 'Allocated to SKUs', nosort: true }], listings, { def: { k: 'spend', d: 'desc' } }) : '<div class="empty">SKU-level ad data arrives with the next daily sync.</div>')}`;
 }
 
-function viewAmazon() {
-  const o = M.amo; const ok = o.filter(x => x.ok), A = agg(ok);
-  const amC = (D.amz && D.amz.ads && D.amz.ads.camps) || []; const spend = sum(amC, c => c[8] || 0);
-  return `
-  <div class="grid g-kpi">
-    ${kpi('Đơn Amazon (365 ngày)', n0(o.length), n0(ok.length) + ' hợp lệ · ' + n0(o.length - ok.length) + ' hủy')}
-    ${kpi('Doanh thu Amazon', usd(A.rev), 'FBM')}
-    ${kpi('Chi phí Ads Amazon (30n)', usd(spend, 2), amC.length + ' chiến dịch')}
-    ${kpi('Doanh số từ Ads', usd(sum(amC, c => c[9] || 0)), 'ACoS ' + (sum(amC, c => c[9] || 0) ? pct(spend / sum(amC, c => c[9] || 0)) : '—'))}
+function viewInventory() {
+  const [f, t] = range();
+  const inv = (D.wf.inv || []).filter(r => passProd(r[0]));
+  const sold30 = {}; for (const x of M.pieces) if (x.ok && x.ch === 'wf' && x.date > addDays(M.today, -30)) sold30[x.part] = (sold30[x.part] || 0) + x.qty;
+  const lastCogs = part => { const L = M.layers[part]; return L && L.length ? L[L.length - 1].cogs : 0; };
+  const rows = inv.map(r => { const p = M.P[r[0]] || {}; const v = (sold30[r[0]] || 0) / 30; return { part: r[0], col: p.col, size: p.size, color: p.color, type: p.type, onHand: r[2] || 0, avail: r[3] || 0, sold30: sold30[r[0]] || 0, cover: v ? (r[2] || 0) / v : null, value: (r[2] || 0) * lastCogs(r[0]) }; });
+  const shownRows = S.hideZero ? rows.filter(r => r.onHand > 0 || r.sold30 > 0) : rows;
+  const tot = { onHand: sum(rows, r => r.onHand), avail: sum(rows, r => r.avail), value: sum(rows, r => r.value) };
+  const v30 = sum(Object.entries(sold30).filter(([p]) => passProd(p)), ([, v]) => v) / 30;
+  const posShown = M.pos.filter(p => !S.f.po.size || S.f.po.has(p.id));
+  const openInb = (D.wf.inb || []).filter(x => x.status === 'OPEN');
+  const inbUnits = sum(openInb, x => sum(x.items || [], i => i[1] || 0));
+  const poCards = posShown.map(po => {
+    const fi = freeInfo(po), inb = po.inb || {};
+    const L = Object.entries(M.layers).flatMap(([part, ls]) => ls.filter(l => l.po === po.id).map(l => ({ part, ...l })));
+    if (!fi) return card(esc(po.id), `${esc(po.whs || '')} · ${esc(inb.po || '')} · ${inb.status === 'OPEN' ? 'in transit' : 'no receiving date yet'}`, `<div class="grid g-kpi" style="gap:10px"><div class="kpi"><div class="lbl">ETA port</div><div class="val" style="font-size:22px">${inb.eta ? dLong(inb.eta) : '—'}</div></div><div class="kpi"><div class="lbl">Container</div><div class="val" style="font-size:18px">${esc(inb.container || '—')}</div></div><div class="kpi"><div class="lbl">Cost sheet</div><div class="val" style="font-size:18px">${(po.items || []).length ? 'On file' : 'Pending'}</div></div></div><p class="note">The 90 free storage days start at Receiving Start. ${(po.items || []).length ? '' : 'Send this PO\'s cost sheet (FOB per factory, freight, duty) so its units get their own landed cost.'}</p>`);
+    const ms = inb.milestones || {}; const pctUsed = Math.max(0, Math.min(1, fi.used / 90));
+    const stp = [['PO created', inb.created], ['Left origin', inb.loadAtd || ms.ATD], ['US port', inb.portAta || ms.ATA], ['Gated out', inb.gatedOut || ms.GATED_OUT_AT_DESTINATION_PORT], ['Receiving start', po.recv]];
+    return `<section class="card glass cg-po"><div class="cg-top"><div><h3>${esc(po.id)} <span class="pill ${inb.status === 'COMPLETED' ? 'good' : 'info'}"><i></i>${esc(inb.status || 'Received')}</span></h3><p class="sub">${esc(po.whs)} · ${esc(inb.po || '')} · ${esc(inb.dest || '')} · ${esc(inb.container || '')}${po.factory ? ' · ' + esc(po.factory) : ''}</p></div>
+      <div style="text-align:right"><div class="cg-days"><b>${Math.max(0, fi.left)}</b><span>free days left</span></div><span class="pill ${fi.left <= 14 ? 'crit' : fi.left <= 45 ? 'warn' : 'good'}"><i></i>Fees start ${dLong(fi.end)}</span></div></div>
+      <div><div class="free-bar"><i style="width:${pctUsed * 100}%"></i></div><div class="legend-row" style="margin-top:6px"><span>Received ${dLong(po.recv)}</span><span>Day ${Math.min(90, fi.used)}/90</span><span>${dLong(fi.end)}</span></div></div>
+      <div class="timeline">${stp.map(([l, d]) => `<div class="st ${d ? 'done' : ''}"><b>${l}</b>${d ? dLong(d) : '—'}</div>`).join('')}</div>
+      <div class="grid g-kpi" style="gap:10px">
+        <div><div class="sub">Received</div><b style="font-size:22px">${n0(fi.recvU)}</b></div><div><div class="sub">Sold (FIFO)</div><b style="font-size:22px">${n0(fi.sold)}</b></div><div><div class="sub">Remaining</div><b style="font-size:22px">${n0(fi.remain)}</b></div><div><div class="sub">Sell-through</div><b style="font-size:22px">${pct(fi.recvU ? fi.sold / fi.recvU : 0)}</b></div><div><div class="sub">Stock value (landed)</div><b style="font-size:22px">${usd(sum(L, l => l.left * l.cogs))}</b></div>
+      </div>
+      ${table('po-' + po.id, [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'qty', l: 'Received', num: true }, { k: 'sold', l: 'Sold', num: true, sv: r => r.qty - r.left, f: (v, r) => n0(r.qty - r.left) }, { k: 'left', l: 'Remaining', num: true }, { k: 'st', l: 'Sell-through', num: true, sv: r => (r.qty - r.left) / r.qty, f: (v, r) => `${pct((r.qty - r.left) / r.qty)}<span class="mini-bar" style="width:${Math.round((r.qty - r.left) / r.qty * 50)}px"></span>` }, { k: 'fob', l: 'FOB', num: true, f: v => usd(v, 2) }, { k: 'cogs', l: 'Landed', num: true, f: v => usd(v, 2) }], L.filter(l => passProd(l.part)), { def: { k: 'left', d: 'desc' } })}
+    </section>`;
+  }).join('');
+  return `${pageHead('Inventory &amp; POs', 'CastleGate stock today · PO cost layers · 90-day free storage countdown')}
+  <div class="grid g-kpi k5">
+    ${kpi('On hand', n0(tot.onHand) + '<small>units</small>', `${n0(rows.filter(r => r.onHand > 0).length)} of ${n0(rows.length)} SKUs in stock`)}
+    ${kpi('Available', n0(tot.avail) + '<small>units</small>', 'Fulfillable at CastleGate')}
+    ${kpi('Stock value', usd(tot.value), 'At latest landed cost')}
+    ${kpi('Days of cover', v30 ? n0(tot.onHand / v30) : '—', `${nf1.format(v30 * 30)} units sold in the last 30 days`)}
+    ${kpi('Inbound', n0(openInb.length) + `<small>${openInb.length === 1 ? 'shipment' : 'shipments'}</small>`, inbUnits ? n0(inbUnits) + ' units' : 'quantities pending cost sheet')}
   </div>
-  ${card('Đơn hàng Amazon', 'Seller Central · Manage Orders', `<div class="tbl-wrap"><table><thead><tr><th>Ngày</th><th>Order ID</th><th>SKU</th><th>ASIN</th><th>Sản phẩm</th><th class="num">SL</th><th class="num">Giá</th><th>Trạng thái</th></tr></thead><tbody>
-    ${o.map(x => `<tr><td>${dLong(x.date)}</td><td>${esc(x.po)}</td><td><b>${esc(x.sku)}</b></td><td>${esc(x.asin)}</td><td>${esc((x.name || '').slice(0, 48))}</td><td class="num">${x.qty}</td><td class="num">${x.price ? usd(x.price, 2) : '—'}</td><td>${x.ok ? esc(x.status) : '<span class="pill crit"><i></i>' + esc(x.status) + '</span>'}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Chưa có đơn</td></tr>'}
-  </tbody></table></div>`)}
-  <p class="note">Amazon đang bán theo hình thức FBM. Số đơn lấy từ Seller Central (365 ngày); chi phí quảng cáo lấy từ Amazon Ads (Sponsored Products).</p>`;
+  ${poCards || '<div class="empty">No PO matches the PO filter</div>'}
+  ${card('CastleGate inventory', 'Live from the Wayfair inventory API', table('inv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'col', l: 'Collection' }, { k: 'size', l: 'Size', f: v => sizeLbl(v), sv: r => r.size || 0 }, { k: 'color', l: 'Color' }, { k: 'onHand', l: 'On hand', num: true }, { k: 'avail', l: 'Available', num: true }, { k: 'sold30', l: 'Sold 30d', num: true }, { k: 'cover', l: 'Days of cover', num: true, f: v => v == null ? '—' : n0(v) }, { k: 'value', l: 'Value', num: true, f: v => usd(v) }], shownRows, { def: { k: 'onHand', d: 'desc' }, foot: { part: 'Total', onHand: tot.onHand, avail: tot.avail, sold30: sum(rows, r => r.sold30), value: tot.value } }),
+    { actions: `<button class="view-toggle" data-act="hideZero" aria-pressed="${S.hideZero}">${S.hideZero ? 'Show all SKUs' : 'Hide zero-stock SKUs'}</button>` })}`;
 }
 
-const VIEWS = { overview: [viewOverview, afterOverview], castlegate: [viewCastleGate, afterCastleGate], sales: [viewSales, afterSales], ads: [viewAds, afterAds], amazon: [viewAmazon, () => {}] };
+// ---------------- sidebar ----------------
+function options(key) {
+  const P = M.P, cnt = {}; for (const x of M.pieces) if (x.ok) { const v = key === 'po' ? x.layer : key === 'sku' ? x.part : key === 'size' ? String(x.size) : x[key]; cnt[v] = (cnt[v] || 0) + x.qty; }
+  let vals;
+  if (key === 'po') vals = [...new Set([...M.pos.map(p => p.id), ...Object.keys(cnt)])].filter(v => v && v !== '—');
+  else if (key === 'sku') vals = Object.keys(P).sort((a, b) => (cnt[b] || 0) - (cnt[a] || 0) || a.localeCompare(b));
+  else if (key === 'size') vals = [...new Set(Object.values(P).map(p => String(p.size)))].sort((a, b) => (+a || 999) - (+b || 999));
+  else vals = [...new Set(Object.values(P).map(p => p[key]).filter(Boolean))].sort();
+  return vals.map(v => ({ v, label: key === 'size' ? (v === 'null' ? 'No size (cart)' : sizeLbl(v)) : key === 'sku' ? `${v} · ${(P[v] && P[v].col) || ''} ${P[v] && P[v].size ? sizeLbl(P[v].size) : ''} ${(P[v] && P[v].color) || ''}` : v, n: cnt[v] || 0 }));
+}
+function renderSidebar() {
+  const [f, t] = range();
+  const presets = [['7d', '7D'], ['30d', '30D'], ['90d', '90D'], ['mtd', 'MTD'], ['qtd', 'QTD'], ['ytd', 'YTD'], ['all', 'All']];
+  const ms = (k, lbl) => { const sel = S.f[k], opts = options(k); const txt = sel.size ? (sel.size === 1 ? (k === 'size' ? sizeLbl([...sel][0]) : [...sel][0]) : sel.size + ' selected') : 'All';
+    return `<details class="ms" data-ms="${k}"${S.open[k] ? ' open' : ''}><summary><span>${lbl}</span><em class="${sel.size ? '' : 'all'}">${esc(txt)}</em></summary><div class="ms-list">${sel.size ? `<button class="ms-clear" data-clear="${k}">Clear</button>` : ''}${opts.map(o => `<label><input type="checkbox" data-f="${k}" value="${esc(o.v)}"${sel.has(o.v) ? ' checked' : ''}><span>${esc(o.label)}</span><small>${o.n ? n0(o.n) : ''}</small></label>`).join('')}</div></details>`; };
+  const nOn = FILTER_KEYS.reduce((s, [k]) => s + S.f[k].size, 0) + (S.platform !== 'all') + S.incTT;
+  $('#filterCount').textContent = nOn || '';
+  $('#sidebar').innerHTML = `
+    <div class="sb-head"><h2>Filters</h2><button class="link-btn" data-act="reset">Reset all</button></div>
+    <div class="sb-sec"><span class="sb-lbl">Date range</span>
+      <div class="chips">${presets.map(([k, l]) => `<button class="chip" data-preset="${k}" aria-pressed="${S.preset === k}">${l}</button>`).join('')}</div>
+      <div class="dates"><input type="date" id="dFrom" value="${f}" max="${M.today}" aria-label="From"><input type="date" id="dTo" value="${t}" max="${M.today}" aria-label="To"></div>
+      <label class="switch">Compare to previous period<input type="checkbox" id="cmp"${S.compare ? ' checked' : ''}></label>
+      ${S.compare ? `<span class="range-note">vs <b>${dLong(prevRange()[0])} – ${dLong(prevRange()[1])}</b></span>` : ''}
+    </div>
+    <div class="sb-sec"><span class="sb-lbl">Platform</span><div class="seg">${[['all', 'All'], ['wf', 'Wayfair'], ['amz', 'Amazon']].map(([k, l]) => `<button data-plat="${k}" aria-pressed="${S.platform === k}">${l}</button>`).join('')}</div></div>
+    <div class="sb-sec"><span class="sb-lbl">Product</span>${ms('col', 'Collection')}${ms('cat', 'Category')}${ms('type', 'Product type')}${ms('size', 'Size')}${ms('color', 'Color')}${ms('sku', 'SKU')}</div>
+    <div class="sb-sec"><span class="sb-lbl">Shipment</span>${ms('po', 'PO')}</div>
+    <div class="sb-sec"><label class="switch">Include Tried &amp; True orders<input type="checkbox" id="incTT"${S.incTT ? ' checked' : ''}></label></div>`;
+}
+
+// ---------------- render & wiring ----------------
+const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, ads: viewAds, inventory: viewInventory };
 function render() {
-  const [v, after] = VIEWS[S.tab];
-  const noData = !((D.wf && (D.wf.inv || D.wf.orders)) || (D.amz && (D.amz.orders || D.amz.ads)));
-  $('#view').innerHTML = (noData ? `<section class="card glass"><div class="alert info"><span class="ic">⟳</span><div><b>Đang chờ kết nối API Wayfair &amp; Amazon</b><span>Dashboard đã sẵn sàng; số liệu bán hàng, tồn kho và quảng cáo sẽ tự hiện sau lần đồng bộ API đầu tiên (chạy tự động mỗi ngày 14:23). KPI và giá vốn đã có.</span></div></div></section>` : '') + v(); after();
-  $$('[data-toggle]').forEach(b => b.onclick = () => { const t = $('#' + b.dataset.toggle); t.hidden = !t.hidden; b.textContent = t.hidden ? 'Bảng' : 'Ẩn bảng'; });
-  $('#filters').style.display = S.tab === 'amazon' ? 'none' : '';
+  renderSidebar();
+  const y = scrollY; $('#view').innerHTML = VIEWS[S.tab](); if (render.keep) scrollTo(0, y); render.keep = false;
 }
-
-// ---------------- wiring ----------------
-function setTab(t) { S.tab = t; $$('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t)); try { history.replaceState(null, '', '#' + t); } catch (e) {} render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+const rerender = () => { render.keep = true; render(); };
+function setTab(t) { S.tab = t; $$('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t)); try { history.replaceState(null, '', '#' + t); } catch (e) {} render(); scrollTo({ top: 0, behavior: 'smooth' }); }
 $$('#tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
-$$('#period button').forEach(b => b.onclick = () => { S.period = b.dataset.p; $$('#period button').forEach(x => x.setAttribute('aria-pressed', x === b)); render(); });
-$$('#channel button').forEach(b => b.onclick = () => { S.channel = b.dataset.c; $$('#channel button').forEach(x => x.setAttribute('aria-pressed', x === b)); render(); });
-$('#incTT').onchange = e => { S.incTT = e.target.checked; render(); };
-$('#themeBtn').onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); const nx = cur === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = nx; store.set('lg-theme', nx, true); if (D) render(); };
+const sb = $('#sidebar');
+sb.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.preset) { S.preset = b.dataset.preset; rerender(); }
+  else if (b.dataset.plat) { S.platform = b.dataset.plat; rerender(); }
+  else if (b.dataset.clear) { S.f[b.dataset.clear].clear(); rerender(); }
+  else if (b.dataset.act === 'reset') { FILTER_KEYS.forEach(([k]) => S.f[k].clear()); S.platform = 'all'; S.incTT = false; S.preset = '30d'; S.compare = true; rerender(); }
+});
+sb.addEventListener('change', e => {
+  const el = e.target;
+  if (el.dataset.f) { const s = S.f[el.dataset.f]; el.checked ? s.add(el.value) : s.delete(el.value); S.open[el.dataset.f] = true; rerender(); }
+  else if (el.id === 'dFrom' || el.id === 'dTo') { const f = $('#dFrom').value, t = $('#dTo').value; if (f && t) { S.preset = 'custom'; [S.from, S.to] = f <= t ? [f, t] : [t, f]; rerender(); } }
+  else if (el.id === 'cmp') { S.compare = el.checked; rerender(); }
+  else if (el.id === 'incTT') { S.incTT = el.checked; rerender(); }
+});
+sb.addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.ms) S.open[d.dataset.ms] = d.open; }, true);
+$('#view').addEventListener('click', e => {
+  const th = e.target.closest('th[data-sort]');
+  if (th) { const id = th.closest('table').dataset.table, k = th.dataset.sort, cur = S.sort[id] || {}; S.sort[id] = { k, d: cur.k === k && cur.d === 'desc' ? 'asc' : 'desc' }; rerender(); return; }
+  const b = e.target.closest('[data-act]'); if (b) { if (b.dataset.act === 'kpiAll') S.kpiAll = !S.kpiAll; if (b.dataset.act === 'hideZero') S.hideZero = !S.hideZero; rerender(); return; }
+  const c = e.target.closest('[data-unchip]'); if (c) { const k = c.dataset.unchip; if (k === 'platform') S.platform = 'all'; else if (k === 'tt') S.incTT = false; else S.f[k].delete(c.dataset.v); rerender(); }
+});
+const openFilters = on => { document.body.classList.toggle('filters-open', on); $('#filterBtn').setAttribute('aria-expanded', on); };
+$('#filterBtn').onclick = () => openFilters(!document.body.classList.contains('filters-open'));
+$('#scrim').onclick = () => openFilters(false);
+// tooltips
+const tip = $('#tip');
+function showTip(el, x, y) { tip.innerHTML = el.getAttribute('data-tip'); tip.hidden = false; const w = tip.offsetWidth, h = tip.offsetHeight; let L = x + 14, T = y + 14; if (L + w > innerWidth - 8) L = x - w - 14; if (T + h > innerHeight - 8) T = y - h - 14; tip.style.left = Math.max(8, L) + 'px'; tip.style.top = Math.max(8, T) + 'px'; }
+document.addEventListener('mousemove', e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) showTip(el, e.clientX, e.clientY); else tip.hidden = true; });
+document.addEventListener('touchstart', e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) { const t0 = e.touches[0]; showTip(el, t0.clientX, t0.clientY); } else tip.hidden = true; }, { passive: true });
+addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
+let rzT, lastW = innerWidth; addEventListener('resize', () => { clearTimeout(rzT); rzT = setTimeout(() => { if (D && Math.abs(innerWidth - lastW) > 30) { lastW = innerWidth; rerender(); } }, 200); });
+$('#themeBtn').onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); const nx = cur === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = nx; store.set('lg-theme', nx, true); if (D) rerender(); };
 $('#logoutBtn').onclick = () => { store.del('lg-dk'); location.hash = ''; location.reload(); };
-let rT; addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(() => D && render(), 180); });
-const th = store.get('lg-theme'); if (th) document.documentElement.dataset.theme = th;
+const th0 = store.get('lg-theme'); if (th0) document.documentElement.dataset.theme = th0;
 
 function start(data, updated) {
-  D = data; buildModel();
-  const u = new Date(updated || (D.meta && D.meta.at * 1000) || Date.now());
-  $('#updated').textContent = 'Cập nhật ' + u.toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' });
+  D = data; D.wf = D.wf || {}; D.meta = D.meta || {}; build();
+  const u = new Date(updated || (D.meta.at * 1000) || Date.now());
+  $('#updated').textContent = 'Updated ' + u.toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short', timeZone: 'Asia/Ho_Chi_Minh' }) + ' GMT+7';
   $('#login').hidden = true; $('#app').hidden = false;
   const h = location.hash.slice(1); setTab(VIEWS[h] ? h : 'overview');
 }
 $('#loginForm').addEventListener('submit', async e => {
-  e.preventDefault(); const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Đang giải mã…'; $('#loginErr').textContent = '';
+  e.preventDefault(); const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Decrypting…'; $('#loginErr').textContent = '';
   try { const { raw, data, updated } = await login($('#user').value, $('#pass').value); store.set('lg-dk', b64e(raw), $('#remember').checked); $('#pass').value = ''; start(data, updated); }
-  catch (x) { $('#loginErr').textContent = x.message === 'bad' ? 'Tài khoản hoặc mật khẩu không đúng' : x.message; }
-  btn.disabled = false; btn.textContent = 'Đăng nhập';
+  catch (x) { $('#loginErr').textContent = x.message === 'bad' ? 'Wrong username or password' : x.message; }
+  btn.disabled = false; btn.textContent = 'Sign in';
 });
 (async () => {
   const k = store.get('lg-dk');
