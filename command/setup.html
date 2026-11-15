@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>LF Command Center · Thiết lập</title>
+<link rel="icon" href="../assets/mark-walnut.png">
+<link rel="stylesheet" href="../assets/styles.css?v=3">
+<link rel="stylesheet" href="assets/cc.css?v=1">
+<style>
+  .wrap{max-width:820px;margin:30px auto;padding:0 18px;display:grid;gap:16px}
+  .f{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px}
+  .f label{display:grid;gap:4px;font-size:12.5px;font-weight:650;color:var(--ink2)}
+  .f input{border:1px solid var(--stroke);background:var(--glass-strong);border-radius:12px;padding:9px 11px;font:inherit;color:var(--ink)}
+  .f .full{grid-column:1/3}
+  .ok{color:var(--good-ink);font-weight:700} .err{color:var(--crit-ink);font-weight:700}
+  pre{white-space:pre-wrap;background:var(--glass-thin);padding:12px;border-radius:12px;font-size:12.5px}
+  @media (max-width:700px){.f{grid-template-columns:1fr}.f .full{grid-column:1}}
+</style>
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<div class="wrap">
+  <div class="page-head"><div><h1>Thiết lập Command Center</h1><p>Chạy một lần trên máy của chị. Mật khẩu và khoá dữ liệu chỉ xử lý trong trình duyệt này, không gửi đi dạng đọc được.</p></div></div>
+
+  <section class="card glass"><h3>1 · Backend giao việc (Google Apps Script)</h3><p class="sub">URL /exec và ADMIN secret lấy sau khi chạy setup() và Deploy (xem hướng dẫn Claude gửi).</p>
+    <div class="f" style="margin-top:12px"><label class="full">Web app URL<input id="api" placeholder="https://script.google.com/macros/s/…/exec"></label><label class="full">ADMIN secret<input id="admin" autocomplete="off"></label></div></section>
+
+  <section class="card glass"><h3>2 · Đăng nhập 2 dash nguồn</h3><p class="sub">Dùng tài khoản đang đăng nhập dash Lignarc và dash Kệ 3 tầng, để lấy khoá giải mã dữ liệu.</p>
+    <div class="f" style="margin-top:12px"><label>Lignarc · Username<input id="lgU" value="salesb2c.lf@vhg.vn" autocomplete="off"></label><label>Lignarc · Password<input id="lgP" type="password" autocomplete="off"></label>
+    <label>Kệ 3 tầng · Email<input id="lfU" value="salesb2c.lf@vhg.vn" autocomplete="off"></label><label>Kệ 3 tầng · Password<input id="lfP" type="password" autocomplete="off"></label></div>
+    <div style="margin-top:10px"><button class="btn" id="test">Kiểm tra giải mã</button> <span id="testOut"></span></div></section>
+
+  <section class="card glass"><h3>3 · Tài khoản Command Center</h3><p class="sub">Mỗi người một email + mật khẩu riêng. Trang chỉ thấy Global, Phú chỉ thấy Local.</p>
+    <div class="f" style="margin-top:12px">
+      <label>Quản lý · Email<input id="mE" placeholder="email của chị"></label><label>Quản lý · Mật khẩu<input id="mP" type="password"></label>
+      <label>Thuỳ Trang · Email<input id="tE"></label><label>Thuỳ Trang · Mật khẩu<input id="tP"></label>
+      <label>Đình Phú · Email<input id="pE"></label><label>Đình Phú · Mật khẩu<input id="pP"></label>
+      <label class="full">Email nhận bản tin 8:15 sáng<input id="dE" placeholder="mặc định = email quản lý"></label></div>
+    <div style="margin-top:14px"><button class="btn pri" id="go">Tạo tài khoản & lưu</button></div>
+    <div id="out" style="margin-top:12px"></div></section>
+</div>
+<script>
+(() => {
+const $ = s => document.querySelector(s), te = new TextEncoder(), td = new TextDecoder();
+const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0)), b64e = u => btoa(String.fromCharCode(...new Uint8Array(u)));
+const hex = u => [...new Uint8Array(u)].map(b => b.toString(16).padStart(2, '0')).join('');
+const sha = async s => hex(await crypto.subtle.digest('SHA-256', te.encode(s)));
+const ITER = 250000;
+async function pb(user, pass, salt, usage) { const base = await crypto.subtle.importKey('raw', te.encode(user.trim().toLowerCase() + '\n' + pass), 'PBKDF2', false, ['deriveKey', 'deriveBits']); return { key: () => crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: ITER }, base, { name: 'AES-GCM', length: 256 }, false, usage), bits: () => crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: ITER }, base, 256) }; }
+const openAes = async (raw, f) => JSON.parse(td.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(f.iv) }, await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']), b64d(f.ct))));
+async function sourceKeys() {
+  const lg = await (await fetch('../data/lignarc.enc.json?ts=' + Date.now(), { cache: 'no-store' })).json();
+  const h = (await sha('lignarc|' + $('#lgU').value.trim().toLowerCase())).slice(0, 16), slot = (lg.users || []).find(u => u.h === h);
+  if (!slot) throw new Error('Lignarc: không thấy username');
+  const k = await (await pb($('#lgU').value, $('#lgP').value, b64d(slot.salt), ['decrypt'])).key();
+  let dk; try { dk = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(slot.iv) }, k, b64d(slot.wk))); } catch (e) { throw new Error('Lignarc: sai mật khẩu'); }
+  const gd = await openAes(dk, lg);
+  const lf = await (await fetch('/LF---B2C-Local/data/data.enc.json?ts=' + Date.now(), { cache: 'no-store' })).json();
+  const raw = new Uint8Array(await (await pb($('#lfU').value, $('#lfP').value, b64d(lf.salt))).bits());
+  let ld; try { ld = await openAes(raw, lf); } catch (e) { throw new Error('Kệ 3 tầng: sai email hoặc mật khẩu'); }
+  return { lg: b64e(dk), lf: hex(raw), info: `Lignarc ${((gd.wf || {}).orders || []).length} dòng đơn · Shopee ${(ld.orders || []).length} đơn` };
+}
+async function slot(email, pass, bundle) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const k = await (await pb(email, pass, salt, ['encrypt'])).key();
+  return { h: (await sha('lfcc|' + email.trim().toLowerCase())).slice(0, 16), salt: b64e(salt), iv: b64e(iv), ct: b64e(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, te.encode(JSON.stringify(bundle)))) };
+}
+$('#test').onclick = async () => { $('#testOut').textContent = 'Đang giải mã…'; try { const s = await sourceKeys(); $('#testOut').innerHTML = '<span class="ok">✓ ' + s.info + '</span>'; } catch (e) { $('#testOut').innerHTML = '<span class="err">' + e.message + '</span>'; } };
+$('#go').onclick = async () => {
+  const out = $('#out'); out.textContent = 'Đang xử lý…';
+  try {
+    const api = $('#api').value.trim(); if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(api)) throw new Error('URL Apps Script chưa đúng (phải kết thúc bằng /exec)');
+    const acc = [['nhi', 'Uyên Nhi', 'manager', '', $('#mE').value, $('#mP').value], ['trang', 'Nguyễn Thị Thuỳ Trang', 'staff', 'global', $('#tE').value, $('#tP').value], ['phu', 'Nguyễn Đình Phú', 'staff', 'local', $('#pE').value, $('#pP').value]];
+    for (const a of acc) { if (!a[4].includes('@') || a[5].length < 8) throw new Error('Tài khoản ' + a[1] + ': cần email và mật khẩu ≥ 8 ký tự'); }
+    const keys = await sourceKeys(), users = [], vault = { v: 1, iter: ITER, users: [] };
+    for (const [id, name, role, channel, email, pass] of acc) {
+      const tok = hex(crypto.getRandomValues(new Uint8Array(24)));
+      users.push({ id, name, role, channel, th: await sha(tok) });
+      vault.users.push(await slot(email, pass, { id, name, role, channel, tok, lg: role === 'manager' || channel === 'global' ? keys.lg : null, lf: role === 'manager' || channel === 'local' ? keys.lf : null }));
+    }
+    const appUrl = location.href.replace(/setup\.html.*$/, '');
+    const r = await (await fetch(api, { method: 'POST', body: JSON.stringify({ op: 'admin.setup', admin: $('#admin').value.trim(), users, vault, managerEmail: $('#dE').value.trim() || $('#mE').value.trim(), appUrl }) })).json();
+    if (!r.ok) throw new Error(r.err === 'admin' ? 'ADMIN secret sai' : 'Backend lỗi: ' + r.err);
+    localStorage.setItem('cc-api', api);
+    const link = appUrl + '?api=' + encodeURIComponent(api);
+    out.innerHTML = `<p class="ok">✓ Đã tạo ${r.users} tài khoản.</p><p>Link đăng nhập (gửi cho Trang & Phú, mở 1 lần là thiết bị nhớ backend):</p><pre>${link}</pre><p class="sub">Trang: ${acc[1][4]} · Phú: ${acc[2][4]} (mật khẩu chị tự gửi riêng). Gửi URL /exec cho Claude để gắn cố định vào cấu hình.</p><p><a class="btn pri" href="${link}">Mở Command Center</a></p>`;
+  } catch (e) { out.innerHTML = '<span class="err">' + e.message + '</span>'; }
+};
+})();
+</script>
+</body>
+</html>

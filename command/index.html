@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#efebe3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14110f" media="(prefers-color-scheme: dark)">
+<title>LF Command Center</title>
+<link rel="icon" href="../assets/mark-walnut.png">
+<link rel="apple-touch-icon" href="../assets/apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/styles.css?v=3">
+<link rel="stylesheet" href="assets/cc.css?v=1">
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<div id="demoBand" class="demo-band" hidden>BẢN DEMO · dữ liệu giả để xem giao diện · đăng nhập thật để thấy số liệu thật</div>
+
+<section id="login" class="login" hidden>
+  <form class="glass login-card" id="loginForm" autocomplete="on">
+    <div class="brand" style="justify-content:center;gap:10px;display:flex;align-items:center"><span class="mark">LF</span><div style="text-align:left"><b style="font-size:20px">Command Center</b><small style="display:block;color:var(--muted)">Global · Local · Accountability</small></div></div>
+    <p class="login-sub">Bảng điều hành tổng hợp Lignarc (Wayfair/Amazon) &amp; Kệ 3 tầng (Shopee)</p>
+    <label class="field"><span>Email</span><input id="user" name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
+    <label class="field"><span>Mật khẩu</span><input id="pass" name="password" type="password" autocomplete="current-password" required></label>
+    <label class="remember"><input type="checkbox" id="remember" checked> Ghi nhớ trên thiết bị này</label>
+    <button class="btn-primary" id="loginBtn" type="submit">Đăng nhập</button>
+    <p class="login-err" id="loginErr" role="alert"></p>
+    <p class="login-foot">Dữ liệu mã hoá AES-256, chỉ giải mã trong trình duyệt sau khi đăng nhập. <a href="?demo=1">Xem bản demo</a></p>
+  </form>
+</section>
+
+<div id="app" hidden>
+  <div class="cc-top">
+    <header class="topbar glass">
+      <div class="brand" style="display:flex;align-items:center;gap:10px"><span class="mark">LF</span><div><b>Command Center</b><small id="sub">Global · Local</small></div></div>
+      <div class="top-actions">
+        <span class="who" id="who"></span>
+        <button class="icon-btn" id="refreshBtn" title="Tải lại dữ liệu" aria-label="Tải lại dữ liệu"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
+        <button class="icon-btn" id="settingsBtn" title="Cài đặt" aria-label="Cài đặt"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+        <button class="icon-btn" id="themeBtn" title="Sáng / tối" aria-label="Sáng / tối"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
+        <button class="icon-btn" id="logoutBtn" title="Đăng xuất" aria-label="Đăng xuất"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
+      </div>
+    </header>
+    <nav class="tabs cc-tabs glass" id="tabs" role="tablist" aria-label="Màn hình"></nav>
+  </div>
+  <main id="view" class="cc-shell view"></main>
+  <footer class="foot">Nguồn: dash Lignarc (Wayfair/Amazon API · Cashflow 26+27) · dash Kệ 3 tầng (Shopee Seller Centre · kế hoạch 2.700 pcs) · Nhật ký giao việc: Google Sheet chỉ ghi thêm, không sửa/xoá.</footer>
+</div>
+<div id="modalRoot"></div>
+<script src="assets/config.js?v=1"></script>
+<script src="assets/playbook.js?v=1"></script>
+<script src="assets/engine.js?v=1"></script>
+<script src="assets/demo.js?v=1"></script>
+<script src="assets/app.js?v=1"></script>
+</body>
+</html>
