@@ -57,6 +57,11 @@ const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n)
 const SER = () => [cssv('--s1'), cssv('--s2'), cssv('--s3'), cssv('--s4'), cssv('--s5')];
 const sizeLbl = s => s && s !== 'null' ? s + '"' : 'Rolling Cart';
 const ET_FMT = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23', weekday: 'short' });
+const VN_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+// Order day/time in GMT+7 — the same dates Partner Home shows (it displays in the viewer's local time, Vietnam)
+const vnParts = iso => Object.fromEntries(VN_FMT.formatToParts(new Date(iso)).map(x => [x.type, x.value]));
+const vnDay = iso => { const p = vnParts(iso); return `${p.year}-${p.month}-${p.day}`; };
+const vnTime = iso => { const p = vnParts(iso); return `${p.hour}:${p.minute}`; };
 const etHourDow = iso => { const p = Object.fromEntries(ET_FMT.formatToParts(new Date(iso)).map(x => [x.type, x.value])); return { h: (+p.hour) % 24, dow: DOW.indexOf(p.weekday) }; };
 const tipRows = (title, rows) => `<b>${esc(title)}</b>` + rows.map(([k, v, c]) => `<div><span>${c ? `<i style="background:${c}"></i>` : ''}${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
 
@@ -90,7 +95,7 @@ function build() {
   for (const r of W.orders || []) {
     const status = SOV[r[0]] || r[3]; const p = prod(r[7]); const qty = +r[11] || 0, price = +r[12] || 0, base = p.base || price;
     const ts = r[17] || null, hd = ts ? etHourDow(ts) : null;
-    lines.push({ ch: 'wf', po: r[0], date: r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
+    lines.push({ ch: 'wf', po: r[0], date: ts ? vnDay(ts) : r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
   }
   for (const r of (D.amz && D.amz.orders) || []) {
     const qty = +r[5] || 0, price = +r[6] || 0;
@@ -115,7 +120,7 @@ function build() {
   }
   const deds = (D.deductions || []).map(d => ({ ...d, ch: 'wf' }));
   const dates = lines.map(l => l.date).filter(Boolean).sort();
-  M = { P, A, CG, cgFee, pos, layers, lines, pieces, deds, first: dates[0] || D.meta.today, today: (D.meta && D.meta.today) || new Date().toISOString().slice(0, 10) };
+  M = { P, A, CG, cgFee, pos, layers, lines, pieces, deds, first: dates[0] || D.meta.today, today: [vnDay(new Date().toISOString()), (D.meta && D.meta.today) || ''].sort().pop() };
   M.listingParts = {}; for (const [k, p] of Object.entries(P)) if (p.fam) (M.listingParts[p.fam] = M.listingParts[p.fam] || []).push(k);
 }
 
@@ -549,7 +554,7 @@ function viewSales() {
     { k: 'units', l: 'Units', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true, f: v => n0(v) }, { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, { k: 'net', l: 'Net Revenue', num: true, f: v => usd(v) }, { k: 'promoPct', l: 'Promo %', num: true, f: v => pct(v, 1) },
     { k: 'share', l: 'Share', num: true, f: v => `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(v * 60)}px"></span>` }], skuRows, { def: { k: 'rev', d: 'desc' }, foot: { part: 'Total', units: a.units, orders: a.orders, rev: a.rev, net: a.net, promoPct: a.rev ? a.promo / a.rev : 0, share: 1 } }))}
   ${card('Orders', `${n0(new Set(ordRows.map(x => x.po)).size)} orders in this period`, table('orders', [
-    { k: 'date', l: 'Date', f: (v, r) => dLong(v) + (r.hour != null ? ` <span class="sub">${String(r.hour).padStart(2, '0')}:00 ET</span>` : '') }, { k: 'po', l: 'PO', f: (v, r) => `<b>${esc(v)}</b> ${r.tt ? '<span class="tag tt">Tried &amp; True</span>' : ''}${r.country === 'CA' ? ' <span class="tag ca">Canada</span>' : ''}${r.b2b ? ' <span class="tag">B2B</span>' : ''}` },
+    { k: 'date', l: 'Date', f: (v, r) => dLong(v) + (r.ts ? ` <span class="sub">${vnTime(r.ts)} GMT+7</span>` : '') }, { k: 'po', l: 'PO', f: (v, r) => `<b>${esc(v)}</b> ${r.tt ? '<span class="tag tt">Tried &amp; True</span>' : ''}${r.country === 'CA' ? ' <span class="tag ca">Canada</span>' : ''}${r.b2b ? ' <span class="tag">B2B</span>' : ''}` },
     { k: 'ch', l: 'Platform', f: v => v === 'wf' ? 'Wayfair' : 'Amazon' }, { k: 'part', l: 'SKU' }, { k: 'qty', l: 'Units', num: true }, { k: 'base', l: 'Base cost', num: true, f: v => usd(v, 2) }, { k: 'price', l: 'Paid', num: true, f: v => usd(v, 2) },
     { k: 'promo', l: 'Promo', num: true, f: (v, r) => r.ok ? pct(r.base ? 1 - r.price / r.base : 0) : '—' }, { k: 'state', l: 'State' }, { k: 'layer', l: 'PO layer' }, { k: 'status', l: 'Status', f: (v, r) => r.ok ? esc(v) : `<span class="tag bad">${esc(v)}</span>` }], ordRows, { def: { k: 'date', d: 'desc' } }))}`;
 }

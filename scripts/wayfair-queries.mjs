@@ -14,7 +14,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const day = s => (s ? String(s).slice(0, 10) : null);
 // '2026-11-12 06:32:11.000000 +00:00' -> Date
 const parseTs = s => { if (!s) return null; const m = String(s).match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*([+-]\d{2}):?(\d{2})?/); const d = m ? new Date(`${m[1]}T${m[2]}${m[3]}:${m[4] || '00'}`) : new Date(s); return isNaN(d) ? null : d; };
-const ET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+const ET = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' });
+// order day in GMT+7 = what Partner Home shows
 const etDay = s => { const d = parseTs(s); return d ? ET.format(d) : day(s); };
 
 const Q_INV = `query inventorySummaryList($supplierId: Int!, $filter: InventoryFilterInput, $page: InventoryPageInput) {
