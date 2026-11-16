@@ -371,3 +371,6 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .case dd.neg{color:var(--crit-ink)}
 .tag.issue{background:color-mix(in srgb,var(--c) 14%,transparent);border-color:color-mix(in srgb,var(--c) 50%,transparent);color:var(--ink);white-space:nowrap}
 @media (max-width:600px){.case dl{grid-template-columns:repeat(2,1fr)}.cases{grid-template-columns:1fr}}
+.install-btn{width:auto;border-radius:999px;padding:0 12px;gap:6px;display:inline-flex;align-items:center;font-weight:650;font-size:13px}
+.install-btn[hidden]{display:none}
+@media (max-width:760px){.install-btn span{display:none}.install-btn{padding:0;width:var(--btn,38px)}}
