@@ -1,9 +1,10 @@
-name: Daily API sync
+name: API sync (every 2 hours)
 on:
   push:
     paths: ['.github/sync-trigger']
   schedule:
-    - cron: '23 7 * * *'   # 14:23 Asia/Saigon
+    # GitHub can delay scheduled runs by hours, so run often: every 2 hours at :17 (UTC)
+    - cron: '17 */2 * * *'
   workflow_dispatch:
     inputs:
       probe:
