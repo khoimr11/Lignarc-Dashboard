@@ -10,12 +10,23 @@
 //
 //   node scripts/api-sync.mjs            -> fetch, merge into data/lignarc.enc.json
 //   node scripts/api-sync.mjs --probe    -> only test logins and print what each API exposes (no data written)
-import { webcrypto as C } from 'node:crypto';
+import { webcrypto as C, createDecipheriv } from 'node:crypto';
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import './../assets/merge.js';
 
 const E = process.env, PROBE = process.argv.includes('--probe');
+// Optional credential overrides (e.g. a re-authorized SP-API refresh token) kept AES-256-GCM encrypted in the repo
+// with the same LG_DK secret — never readable by dashboard users, never in plain text.
+if (E.LG_DK && fs.existsSync('data/cred.enc.json')) {
+  try {
+    const f = JSON.parse(fs.readFileSync('data/cred.enc.json', 'utf8')), b = x => Buffer.from(x, 'base64'), ct = b(f.ct);
+    const d = createDecipheriv('aes-256-gcm', b(E.LG_DK), b(f.iv)); d.setAuthTag(ct.subarray(-16));
+    const cred = JSON.parse(Buffer.concat([d.update(ct.subarray(0, -16)), d.final()]).toString('utf8'));
+    for (const [k, v] of Object.entries(cred)) if (v) E[k] = v;
+    console.log('credential overrides:', Object.keys(cred).join(', '));
+  } catch (e) { console.log('cred.enc.json not usable:', e.message); }
+}
 const FILE = 'data/lignarc.enc.json', MARKETPLACE = 'ATVPDKIKX0DER';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
@@ -84,6 +95,29 @@ async function amazonFinances(sinceDays) {
   if (PROBE) return { n: rows.length, sample: rows.slice(0, 8) };
   return { v: 1, src: 'amazon-finances', at: Math.floor(Date.now() / 1000), rows };
 }
+// ---------- Amazon SP-API: Sales & Traffic business report (sessions, page views, conversion, Buy Box) — Brand Analytics role ----------
+async function amazonTraffic(sinceDays) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0', 'content-type': 'application/json' }, base = 'https://sellingpartnerapi-na.amazon.com';
+  const day = d => new Date(d).toISOString().slice(0, 10), end = Date.now() - 864e5;
+  const run = async (opts, from) => {
+    const c = await http(`${base}/reports/2021-06-30/reports`, { method: 'POST', headers: H, body: JSON.stringify({ reportType: 'GET_SALES_AND_TRAFFIC_REPORT', marketplaceIds: [MARKETPLACE], dataStartTime: day(from) + 'T00:00:00Z', dataEndTime: day(end) + 'T23:59:59Z', reportOptions: opts }) });
+    for (let i = 0; i < 40; i++) {
+      await sleep(15000); const r = await http(`${base}/reports/2021-06-30/reports/${c.reportId}`, { headers: H });
+      if (r.processingStatus === 'DONE') { const d = await http(`${base}/reports/2021-06-30/documents/${r.reportDocumentId}`, { headers: H }); const buf = Buffer.from(await (await fetch(d.url)).arrayBuffer()); return JSON.parse((d.compressionAlgorithm === 'GZIP' ? zlib.gunzipSync(buf) : buf).toString('utf8')); }
+      if (/CANCELLED|FATAL/.test(r.processingStatus)) throw new Error('traffic report ' + r.processingStatus);
+    }
+    throw new Error('traffic report timeout');
+  };
+  const n = v => v && typeof v === 'object' ? +(v.amount ?? 0) : +(v || 0);
+  const j = await run({ dateGranularity: 'DAY', asinGranularity: 'CHILD' }, end - sinceDays * 864e5);
+  // [0 date, 1 sessions, 2 page views, 3 units ordered, 4 ordered sales, 5 order items, 6 buy box %, 7 unit session %]
+  const byDate = (j.salesAndTrafficByDate || []).map(x => { const S = x.salesByDate || {}, T = x.trafficByDate || {}; return [x.date, T.sessions || 0, T.pageViews || 0, S.unitsOrdered || 0, n(S.orderedProductSales), S.totalOrderItems || 0, T.buyBoxPercentage ?? null, T.unitSessionPercentage ?? null]; });
+  // [0 child asin, 1 sku, 2 sessions, 3 page views, 4 units, 5 sales, 6 buy box %, 7 unit session %] — totals over the window
+  const byAsin = (j.salesAndTrafficByAsin || []).map(x => { const S = x.salesByAsin || {}, T = x.trafficByAsin || {}; return [x.childAsin || x.parentAsin, x.sku || null, T.sessions || 0, T.pageViews || 0, S.unitsOrdered || 0, n(S.orderedProductSales), T.buyBoxPercentage ?? null, T.unitSessionPercentage ?? null]; });
+  if (PROBE) return { byDate: byDate.slice(-5), byAsin };
+  return { v: 1, src: 'amazon-traffic', at: Math.floor(Date.now() / 1000), byDate, byAsin, from: day(end - sinceDays * 864e5), to: day(end) };
+}
 // ---------- Amazon Ads API: Sponsored Products daily campaign report (v3) ----------
 async function amazonAds(days) {
   const tok = await lwa(E.AMZ_ADS_CLIENT_ID, E.AMZ_ADS_CLIENT_SECRET, E.AMZ_ADS_REFRESH_TOKEN);
@@ -145,6 +179,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
 (async () => {
   const jobs = [];
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-orders', () => amazonOrders(+(E.AMZ_ORDER_DAYS || 45))]);
+  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))]);
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-finances', () => amazonFinances(+(E.AMZ_FIN_DAYS || 400))]);
   if (has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) jobs.push(['wayfair', wayfair]);
