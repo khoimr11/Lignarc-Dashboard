@@ -47,11 +47,11 @@ async function lwa(id, secret, refresh) {
   return j.access_token;
 }
 // ---------- Amazon SP-API: orders (last 365 days on first run, then last 45 days) ----------
-async function amazonOrders(sinceDays) {
+async function amazonOrders(sinceDays, by = 'CreatedAfter') {
   const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
   const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com';
   const after = new Date(Date.now() - sinceDays * 864e5).toISOString();
-  let url = `${base}/orders/v0/orders?MarketplaceIds=${MARKETPLACE}&CreatedAfter=${encodeURIComponent(after)}&MaxResultsPerPage=100`;
+  let url = `${base}/orders/v0/orders?MarketplaceIds=${MARKETPLACE}&${by}=${encodeURIComponent(after)}&MaxResultsPerPage=100`;
   const orders = [];
   while (url) { const j = await http(url, { headers: H }); const p = j.payload || {}; orders.push(...(p.Orders || [])); url = p.NextToken ? `${base}/orders/v0/orders?MarketplaceIds=${MARKETPLACE}&NextToken=${encodeURIComponent(p.NextToken)}` : null; await sleep(1100); }
   if (PROBE) return { orders: orders.length };
@@ -135,6 +135,30 @@ async function amazonFeedback(asins) {
   if (PROBE) return out;
   return { v: 1, src: 'amazon-feedback', at: Math.floor(Date.now() / 1000), items: out };
 }
+// ---------- Amazon SP-API: Best Seller Rank (Catalog) + Buy Box / offers (Pricing) per ASIN ----------
+async function amazonCatalog(asins) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com', rows = [], err = {};
+  for (const a of asins) {
+    const r = { asin: a, at: new Date().toISOString() };
+    try {
+      const c = await http(`${base}/catalog/2022-04-01/items/${a}?marketplaceIds=${MARKETPLACE}&includedData=salesRanks,summaries`, { headers: H });
+      const sr = (c.salesRanks || [])[0] || {};
+      r.cls = (sr.classificationRanks || []).map(x => [x.title, x.rank]); r.disp = (sr.displayGroupRanks || []).map(x => [x.title, x.rank]);
+    } catch (e) { err[a + ':catalog'] = e.message.slice(0, 200); }
+    await sleep(1200);
+    try {
+      const o = await http(`${base}/products/pricing/v0/items/${a}/offers?MarketplaceId=${MARKETPLACE}&ItemCondition=New`, { headers: H });
+      const P = o.payload || {}, sm = P.Summary || {}, offers = P.Offers || [];
+      const bb = (sm.BuyBoxPrices || [])[0], mine = offers.find(x => x.MyOffer);
+      r.offers = sm.TotalOfferCount ?? offers.length; r.bbPrice = bb ? +(bb.LandedPrice || bb.ListingPrice || {}).Amount : null;
+      r.myPrice = mine ? +(mine.ListingPrice || {}).Amount : null; r.myBB = mine ? !!mine.IsBuyBoxWinner : null; r.lowest = ((sm.LowestPrices || [])[0] || {}).LandedPrice ? +sm.LowestPrices[0].LandedPrice.Amount : null;
+    } catch (e) { err[a + ':pricing'] = e.message.slice(0, 200); }
+    rows.push(r); await sleep(2200);
+  }
+  if (PROBE) return { rows, err };
+  return { v: 1, src: 'amazon-catalog', at: Math.floor(Date.now() / 1000), rows, err };
+}
 // ---------- Amazon Ads API: Sponsored Products daily campaign report (v3) ----------
 async function amazonAds(days) {
   const tok = await lwa(E.AMZ_ADS_CLIENT_ID, E.AMZ_ADS_CLIENT_SECRET, E.AMZ_ADS_REFRESH_TOKEN);
@@ -194,13 +218,18 @@ async function wayfair() {
 const b64 = u => Buffer.from(u).toString('base64'), ub = s => new Uint8Array(Buffer.from(s, 'base64'));
 async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, ['encrypt', 'decrypt']); }
 (async () => {
+  // Tiered schedule: the workflow runs every 15 min; heavier jobs only when their interval has passed (state in data/sync-state.json).
+  const ST_FILE = 'data/sync-state.json', st = fs.existsSync(ST_FILE) ? JSON.parse(fs.readFileSync(ST_FILE, 'utf8')) : {}, now = Date.now();
+  const due = (k, min) => E.SYNC_ALL === '1' || !st[k] || now - st[k] >= min * 60e3 - 90e3;
+  const T = { hourly: due('hourly', 60), six: due('six', 360), daily: due('daily', 1440) };
+  log('tiers', JSON.stringify(T));
+  const SP = has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN'), ASINS = (E.AMZ_ASINS || 'B0HJQQ3MY4').split(',');
   const jobs = [];
-  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-orders', () => amazonOrders(+(E.AMZ_ORDER_DAYS || 45))]);
-  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-feedback', () => amazonFeedback((E.AMZ_ASINS || 'B0HJQQ3MY4').split(','))]);
-  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))]);
-  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-finances', () => amazonFinances(+(E.AMZ_FIN_DAYS || 400))]);
-  if (has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
-  if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) jobs.push(['wayfair', wayfair]);
+  if (SP) jobs.push(['amazon-orders', () => T.daily ? amazonOrders(+(E.AMZ_ORDER_DAYS || 45)) : amazonOrders(3, 'LastUpdatedAfter')]);
+  if (SP && T.hourly) jobs.push(['amazon-finances', () => amazonFinances(T.daily ? +(E.AMZ_FIN_DAYS || 400) : 60)]);
+  if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)]);
+  if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
+  if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) { E.WF_SKIP = [T.hourly ? '' : 'inb', T.six ? '' : 'ads,adsSku'].filter(Boolean).join(','); jobs.push(['wayfair', wayfair]); }
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }
   const payloads = [], errors = {};
   for (const [name, fn] of jobs) { try { const p = await fn(); log(name, 'ok', PROBE ? JSON.stringify(p).slice(0, 4000) : ''); if (!PROBE) payloads.push(p); } catch (e) { errors[name] = e.message.slice(0, 300); log(name, 'FAILED', e.message); } }
@@ -208,8 +237,13 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
   if (!E.LG_DK) throw new Error('LG_DK secret missing');
   const dk = ub(E.LG_DK), file = JSON.parse(fs.readFileSync(FILE, 'utf8'));
   const data = JSON.parse(new TextDecoder().decode(await C.subtle.decrypt({ name: 'AES-GCM', iv: ub(file.iv) }, await aes(dk), ub(file.ct))));
+  const fp = d => { const m = { ...d.meta }; for (const k of Object.keys(m)) if (/At$|^at$|^checked/.test(k)) delete m[k]; return C.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ ...d, meta: m }))).then(h => Buffer.from(h).toString('hex')); };
+  const before = await fp(data);
   for (const p of payloads) log('merge', JSON.stringify(globalThis.LGMERGE(data, p)));
   data.meta.apiErrors = Object.keys(errors).length ? errors : null;
+  for (const k of ['hourly', 'six', 'daily']) if (T[k]) st[k] = now;
+  st.errors = data.meta.apiErrors; fs.writeFileSync(ST_FILE, JSON.stringify(st));
+  if (await fp(data) === before) { log('no data change — data file left untouched'); return; }
   const iv = C.getRandomValues(new Uint8Array(12));
   Object.assign(file, { iv: b64(iv), ct: b64(new Uint8Array(await C.subtle.encrypt({ name: 'AES-GCM', iv }, await aes(dk), new TextEncoder().encode(JSON.stringify(data))))), updated: new Date().toISOString() });
   fs.writeFileSync(FILE, JSON.stringify(file)); log('wrote', FILE);

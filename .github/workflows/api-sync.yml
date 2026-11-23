@@ -1,10 +1,11 @@
-name: API sync (every 2 hours)
+name: API sync (every 15 min, tiered)
 on:
   push:
     paths: ['.github/sync-trigger']
   schedule:
-    # GitHub can delay scheduled runs by hours, so run often: every 2 hours at :17 (UTC)
-    - cron: '17 */2 * * *'
+    # Every 15 min: orders + inventory. Hourly: Amazon finances, inbound. Every 6 h: traffic, BSR/Buy Box, ads reports.
+    # Daily: full re-pull. Tier state lives in data/sync-state.json. Data file is committed only when its content changes.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       probe:
@@ -37,9 +38,11 @@ jobs:
       - name: Commit data
         if: ${{ !inputs.probe }}
         run: |
+          git add -N data/sync-state.json 2>/dev/null || true
           if git diff --quiet data/; then echo "no changes"; exit 0; fi
           git config user.name "lignarc-sync"
           git config user.email "lignarc-sync@users.noreply.github.com"
-          git add data/lignarc.enc.json
-          git commit -m "data: API sync $(TZ=Asia/Ho_Chi_Minh date '+%Y-%m-%d %H:%M') GMT+7"
+          git add data/lignarc.enc.json data/sync-state.json
+          if git diff --cached --quiet -- data/lignarc.enc.json; then MSG="sync state"; else MSG="data: API sync"; fi
+          git commit -m "$MSG $(TZ=Asia/Ho_Chi_Minh date '+%Y-%m-%d %H:%M') GMT+7"
           git pull --rebase -q && git push

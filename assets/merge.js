@@ -22,6 +22,10 @@
       data.meta.wfAt = p.at; data.meta.wfErr = p.err || null;
     } else if (p.src === 'amazon-orders') {
       data.amz.orders = mergeBy(data.amz.orders, p.orders, r => r[0] + '|' + r[3]).sort((a, b) => (b[1] || '').localeCompare(a[1] || '')); res.orders = data.amz.orders.length; data.meta.amzOrdersAt = p.at;
+    } else if (p.src === 'amazon-catalog') {
+      // Best Seller Rank / Buy Box snapshots: keep one row per ASIN per hour
+      const rows = p.rows.map(r => [r.at.slice(0, 13), r.asin, (r.cls && r.cls[0]) || null, (r.disp && r.disp[0]) || null, r.myPrice ?? null, r.bbPrice ?? null, r.offers ?? null, r.myBB ?? null, r.lowest ?? null]);
+      data.amz.rank = mergeBy(data.amz.rank, rows, r => r[0] + '|' + r[1]).sort((a, b) => a[0].localeCompare(b[0])).slice(-3000); res.rank = data.amz.rank.length; data.meta.amzCatalogAt = p.at; data.meta.amzCatalogErr = Object.keys(p.err || {}).length ? p.err : null;
     } else if (p.src === 'amazon-feedback') {
       data.amz.feedback = { at: p.at, items: p.items }; res.feedback = Object.keys(p.items).length;
     } else if (p.src === 'amazon-traffic') {

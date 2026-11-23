@@ -46,7 +46,7 @@ const num = v => { const n = parseFloat(String(v ?? '').replace(/[$,%\s]/g, ''))
 
 export default async function wayfair({ gql, http, tok }) {
   const out = { v: 3, src: 'wayfair', at: Math.floor(Date.now() / 1000), via: 'api' }, err = {};
-  const step = async (k, fn) => { try { out[k] = await fn(); console.log('  wayfair', k, Array.isArray(out[k]) ? out[k].length : 'ok'); } catch (e) { err[k] = e.message.slice(0, 300); console.log('  wayfair', k, 'FAILED', e.message.slice(0, 300)); } };
+  const step = async (k, fn) => { if ((process.env.WF_SKIP || '').split(',').includes(k)) { console.log('  wayfair', k, 'skipped (tier)'); return; } try { out[k] = await fn(); console.log('  wayfair', k, Array.isArray(out[k]) ? out[k].length : 'ok'); } catch (e) { err[k] = e.message.slice(0, 300); console.log('  wayfair', k, 'FAILED', e.message.slice(0, 300)); } };
   const q = async (url, query, variables) => { const j = await gql(url, query, variables); if (j.errors && !j.data) throw new Error(JSON.stringify(j.errors).slice(0, 300)); return j.data; };
 
   // 1) CastleGate on-hand inventory
