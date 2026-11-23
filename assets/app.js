@@ -995,7 +995,7 @@ function verifyCase(c, ctx) {
       else add('valid', 'Customer', 'Buyer remorse — the listing dimensions are complete.', 'Nothing to dispute.');
     }
     if (c.kind === 'Return' && c.deduction > 0 && paid) { const exp = paid * 0.96 * 0.75; add(Math.abs(c.deduction - exp) / exp < 0.12 || Math.abs(c.deduction - paid * 0.75) / (paid * 0.75) < 0.05 ? 'valid' : 'review', 'Wayfair', `Return credit ${usd(c.deduction, 2)} vs ${usd(exp, 2)} expected under Wayfair-Managed Returns (paid ${usd(paid, 2)} × 96% × 75%).`, 'Matches the program terms unless flagged.'); }
-    if (c.review && c.review.photo === 'pending' && c.photos) add('review', 'Us', c.review.note || `${c.photos} photos not yet reviewed.`, 'Open the case photos in Partner Home and compare them with the SKU images; the weekly check records the result.');
+    if (c.review && c.review.photo === 'pending' && c.photos) { if (c.deduction > 0 && !(c.media || []).length) add('evidence', 'Wayfair', c.review.note || `${c.photos} photos listed but not viewable.`, 'Ask Wayfair to re-attach the customer photos before accepting the charge.'); else add('review', 'Us', c.review.note || `${c.photos} photos not yet reviewed.`, 'Compare the photos with the SKU images; the weekly check records the result.'); }
     if (/^u+$|^\.+$|^x+$/i.test((c.comment || '').trim())) add('evidence', 'Customer', `Meaningless comment ("${c.comment}") and ${c.photos ? c.photos + ' photos' : 'no photos'}.`, c.deduction ? 'Dispute: no usable description of the damage.' : 'Watch: if a deduction follows, dispute it.');
   } else {
     // Amazon
