@@ -22,6 +22,9 @@
       data.meta.wfAt = p.at; data.meta.wfErr = p.err || null;
     } else if (p.src === 'amazon-orders') {
       data.amz.orders = mergeBy(data.amz.orders, p.orders, r => r[0] + '|' + r[3]).sort((a, b) => (b[1] || '').localeCompare(a[1] || '')); res.orders = data.amz.orders.length; data.meta.amzOrdersAt = p.at;
+    } else if (p.src === 'amazon-finances') {
+      // deferred transactions get re-posted as released with the same id: latest copy wins
+      data.amz.fin = mergeBy(data.amz.fin, p.rows, r => r[0]).sort((a, b) => (a[1] || '').localeCompare(b[1] || '')); res.fin = data.amz.fin.length; data.meta.amzFinAt = p.at;
     } else if (p.src === 'amazon-ads') {
       const A = data.amz.ads = data.amz.ads || {}; if (p.camps) A.camps = p.camps; A.daily = mergeBy(A.daily, p.daily, r => r[0]).sort((a, b) => a[0].localeCompare(b[0])); res.days = A.daily.length; data.meta.amzAdsAt = p.at;
     } else throw new Error('unknown payload ' + p.src);

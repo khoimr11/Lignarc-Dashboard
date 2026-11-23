@@ -49,10 +49,40 @@ async function amazonOrders(sinceDays) {
     const it = await http(`${base}/orders/v0/orders/${o.AmazonOrderId}/orderItems`, { headers: H }); await sleep(2100);
     for (const i of (it.payload && it.payload.OrderItems) || []) {
       const q = i.QuantityOrdered || 0, price = i.ItemPrice ? +i.ItemPrice.Amount : 0;
-      rows.push([o.AmazonOrderId, (o.PurchaseDate || '').slice(0, 10), o.OrderStatus, i.SellerSKU, i.ASIN, q, q ? Math.round(price / q * 100) / 100 : price, (i.Title || '').slice(0, 90), o.FulfillmentChannel === 'AFN' ? 'afn' : 'mfn']);
+      const amt = x => x ? +x.Amount || 0 : 0;
+      // [0 order, 1 date, 2 status, 3 sku, 4 asin, 5 qty, 6 unit price, 7 title, 8 channel, 9 promo discount (item+ship), 10 shipping charged, 11 purchase ts UTC]
+      rows.push([o.AmazonOrderId, (o.PurchaseDate || '').slice(0, 10), o.OrderStatus, i.SellerSKU, i.ASIN, q, q ? Math.round(price / q * 100) / 100 : price, (i.Title || '').slice(0, 90), o.FulfillmentChannel === 'AFN' ? 'afn' : 'mfn',
+        Math.round((amt(i.PromotionDiscount) + amt(i.ShippingDiscount)) * 100) / 100, amt(i.ShippingPrice), o.PurchaseDate || '']);
     }
   }
   return { v: 1, src: 'amazon-orders', at: Math.floor(Date.now() / 1000), orders: rows };
+}
+// ---------- Amazon SP-API: Finances (every transaction incl. deferred: order payments, refunds, fees, ad charges, subscription) ----------
+async function amazonFinances(sinceDays) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com';
+  const rows = [], now = Date.now();
+  // the API returns at most 180 days per request window
+  for (let from = now - sinceDays * 864e5; from < now; from += 170 * 864e5) {
+    const to = Math.min(from + 170 * 864e5, now - 3 * 60e3);
+    let next = null;
+    do {
+      const u = `${base}/finances/2024-06-19/transactions?marketplaceId=${MARKETPLACE}&postedAfter=${encodeURIComponent(new Date(from).toISOString())}&postedBefore=${encodeURIComponent(new Date(to).toISOString())}` + (next ? `&nextToken=${encodeURIComponent(next)}` : '');
+      const j = await http(u, { headers: H }); const p = j.payload || {};
+      for (const t of p.transactions || []) {
+        const leaf = {}, walk = (bs, path) => { for (const b of bs || []) { const k = path ? path + '/' + b.breakdownType : b.breakdownType; if (b.breakdowns && b.breakdowns.length) walk(b.breakdowns, k); else leaf[k] = Math.round(((leaf[k] || 0) + (b.breakdownAmount ? +b.breakdownAmount.currencyAmount : 0)) * 100) / 100; } };
+        let sku = null, qty = 0;
+        for (const it of t.items || []) { walk(it.breakdowns, ''); for (const c of it.contexts || []) { if (c.sku) sku = c.sku; if (c.quantityShipped) qty += c.quantityShipped; } }
+        if (!Object.keys(leaf).length) walk(t.breakdowns, '');
+        const rel = Object.fromEntries((t.relatedIdentifiers || []).map(r => [r.relatedIdentifierName, r.relatedIdentifierValue]));
+        // [0 id, 1 posted UTC, 2 type, 3 status, 4 order id, 5 sku, 6 qty, 7 total, 8 description, 9 leaf breakdowns]
+        rows.push([t.transactionId, t.postedDate, t.transactionType, t.transactionStatus, rel.ORDER_ID || null, sku, qty, t.totalAmount ? +t.totalAmount.currencyAmount : 0, t.description || '', leaf]);
+      }
+      next = p.nextToken; await sleep(2100);
+    } while (next);
+  }
+  if (PROBE) return { n: rows.length, sample: rows.slice(0, 8) };
+  return { v: 1, src: 'amazon-finances', at: Math.floor(Date.now() / 1000), rows };
 }
 // ---------- Amazon Ads API: Sponsored Products daily campaign report (v3) ----------
 async function amazonAds(days) {
@@ -115,6 +145,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
 (async () => {
   const jobs = [];
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-orders', () => amazonOrders(+(E.AMZ_ORDER_DAYS || 45))]);
+  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-finances', () => amazonFinances(+(E.AMZ_FIN_DAYS || 400))]);
   if (has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) jobs.push(['wayfair', wayfair]);
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }
