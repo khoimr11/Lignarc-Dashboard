@@ -84,6 +84,23 @@ async function publish(payloads) {
   throw new Error('Không ghi được sau 3 lần thử');
 }
 window.LGSYNC = { ready: () => refresh().then(JSON.stringify), publish: p => publish(Array.isArray(p) ? p : [p]).then(JSON.stringify) };
+// customer photos (incidents/returns): encrypted with the data key and stored one file per photo in data/media/
+async function putMedia(name, b64) {
+  if (!/^[a-z0-9-]{3,80}$/i.test(name)) throw new Error('bad media name');
+  const raw = b64d(ls.get('lg-dk')), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aes(raw), b64d(b64)));
+  const url = 'https://api.github.com/repos/' + REPO + '/contents/data/media/' + name + '.enc.json';
+  let sha; { const r = await fetch(url + '?ref=main', { headers: tokH(), cache: 'no-store' }); if (r.ok) sha = (await r.json()).sha; }
+  const body = { message: 'media: ' + name, content: btoa(JSON.stringify({ iv: b64e(iv), ct: b64e(ct) })), branch: 'main' }; if (sha) body.sha = sha;
+  const r = await fetch(url, { method: 'PUT', headers: { ...tokH(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error('GitHub media ' + r.status); log('Đã lưu ảnh ' + name + ' (' + Math.round(b64.length * 0.75 / 1024) + ' KB)'); return name;
+}
+addEventListener('message', e => {
+  if (!ORIGINS.includes(e.origin) || !e.data || e.data.type !== 'lg-media') return;
+  const src = e.source, id = e.data.id;
+  queue = queue.then(() => putMedia(e.data.name, e.data.b64)).then(n => src.postMessage({ type: 'lg-ack', id, ok: true, result: n }, e.origin))
+    .catch(x => { log('LỖI ảnh ' + x.message); src.postMessage({ type: 'lg-ack', id, ok: false, error: x.message }, e.origin); });
+});
 // collectors in Wayfair / Amazon tabs open this page and post their payload here
 addEventListener('message', e => {
   if (!ORIGINS.includes(e.origin) || !e.data || e.data.type !== 'lg-data') return;

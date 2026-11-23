@@ -458,3 +458,7 @@ td.ck.na{color:var(--muted)}
 .ticket{margin-top:10px}.ticket summary{cursor:pointer;font-weight:650;font-size:13px}
 .ticket textarea{width:100%;margin-top:8px;border-radius:10px;border:1px solid var(--stroke);background:var(--glass-thin);color:var(--ink);font:12px/1.5 var(--mono);padding:10px;resize:vertical}
 .btn-copy{margin-top:6px;height:32px;padding:0 14px;border-radius:9px;border:1px solid var(--stroke);background:var(--glass-strong);color:var(--ink);font-weight:650;cursor:pointer}
+
+.cphotos{display:flex;gap:6px;overflow-x:auto;margin:10px 0 2px;padding-bottom:4px}
+.cphotos a{flex:none;cursor:zoom-in}.cphotos img{height:96px;width:96px;object-fit:cover;border-radius:10px;background:var(--glass-thin);border:1px solid var(--stroke);display:block}
+.cphotos img.err{opacity:.3}

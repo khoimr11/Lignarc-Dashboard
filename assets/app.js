@@ -1057,6 +1057,7 @@ function viewQuality() {
       <h4><span class="tag issue" style="--c:${issueColor(c.issue)}">${esc(c.issue)}</span> ${esc(c.detail)}</h4>
       ${c.comment ? `<blockquote>“${esc(c.comment)}”</blockquote>` : '<p class="sub nocomment">Customer left no comment</p>'}
       <dl><div><dt>${c.ch === 'amz' ? 'Order' : 'PO'}</dt><dd>${esc(c.po)}${c.tt ? ' <span class="tag tt">Tried &amp; True</span>' : ''}</dd></div><div><dt>${c.ch === 'amz' ? 'Requested' : 'Delivered'}</dt><dd>${dLong(c.delivered || c.requested)}${c.state ? ' · ' + esc(c.state) : ''}</dd></div><div><dt>Photos</dt><dd>${c.photos || '—'}${c.review && c.review.photo && c.review.photo !== 'none' ? ` · <b>${esc({ match: 'match the SKU', mismatch: 'NOT this SKU', pending: 'not reviewed', 'listing-conflict': 'show a listing error' }[c.review.photo] || c.review.photo)}</b>` : ''}</dd></div><div><dt>${c.ch === 'amz' ? 'Refunded' : 'Deducted'}</dt><dd class="${c.deduction ? 'neg' : ''}">${c.deduction ? usd(c.deduction, 2) : 'None'}</dd></div>${c.V.paid != null ? `<div><dt>Wholesale paid</dt><dd>${usd(c.V.paid, 2)}</dd></div>` : ''}</dl>
+      ${(() => { const files = c.media || ((D.incidentMedia || {})[c.po] || {}).files || []; return files.length ? `<div class="cphotos">${files.map((f, i) => `<a target="_blank" rel="noopener" title="Customer photo ${i + 1}"><img data-media="${esc(f)}" alt="Customer photo ${i + 1}"></a>`).join('')}</div>` : (c.photos ? `<p class="sub nocomment">${c.photos} customer photo${c.photos > 1 ? 's' : ''} in Partner Home — not synced yet</p>` : ''); })()}
       <ul class="findings">${c.V.findings.map(f => `<li class="f-${f.v}"><span class="own" style="--c:${ownerC[f.owner] || 'var(--axis)'}">${esc(f.owner)}</span><div><b>${esc(f.text)}</b><em>${esc(f.action)}</em></div></li>`).join('')}</ul>
       ${c.V.verdict === 'dispute' || c.V.verdict === 'evidence' ? `<details class="ticket"><summary>Ticket text to send ${c.ch === 'amz' ? 'Amazon' : 'Wayfair'}</summary><textarea readonly rows="12">${esc(ticketText(c, c.V))}</textarea><button type="button" class="btn-copy" data-copy>Copy</button></details>` : ''}
     </article>`;
@@ -1601,8 +1602,17 @@ function viewListings() {
 const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, promos: viewPromos, listings: viewListings, ads: viewAds, quality: viewQuality, inventory: viewInventory };
 function render() {
   renderSidebar();
-  const y = scrollY; $('#view').innerHTML = VIEWS[S.tab](); if (render.keep) scrollTo(0, y); render.keep = false;
+  const y = scrollY; $('#view').innerHTML = VIEWS[S.tab](); if (render.keep) scrollTo(0, y); render.keep = false; loadMedia();
 }
+// customer photos: data/media/<name>.enc.json, AES-GCM with the data key, decrypted in the browser only
+const MEDIA = new Map();
+async function mediaUrl(name) {
+  if (MEDIA.has(name)) return MEDIA.get(name);
+  const p = (async () => { const f = await (await fetch('data/media/' + name + '.enc.json', { cache: 'force-cache' })).json(); const k = await crypto.subtle.importKey('raw', LIVE.raw, 'AES-GCM', false, ['decrypt']);
+    return URL.createObjectURL(new Blob([await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(f.iv) }, k, b64d(f.ct))], { type: 'image/jpeg' })); })();
+  MEDIA.set(name, p); p.catch(() => MEDIA.delete(name)); return p;
+}
+function loadMedia() { if (!LIVE || !LIVE.raw) return; $$('#view img[data-media]').forEach(async im => { try { const u = await mediaUrl(im.dataset.media); im.src = u; const a = im.closest('a'); if (a) a.href = u; } catch (e) { im.classList.add('err'); } }); }
 const rerender = () => { render.keep = true; render(); };
 function setTab(t) { S.tab = t; $$('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t)); try { history.replaceState(null, '', '#' + t); } catch (e) {} render(); scrollTo({ top: 0, behavior: 'smooth' }); }
 $$('#tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
