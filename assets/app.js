@@ -598,6 +598,7 @@ function viewSales() {
     ${kpi('Returns', n0(cur.a.returnUnits) + '<small>units</small>', `${usd(cur.a.returns)} deducted · ${n0(sum(bad, x => x.qty))} cancelled/rejected`)}
   </div>
   ${card('Units, NMV and marketing cost', `Bars = units sold · line = NMV · dashed = % Mkt fee of revenue · by ${autoGran(f, t)}`, combo(buckets(cur.ps, cur.ad, f, t, autoGran(f, t))), { actions: granBtns(), cls: 'big-chart' })}
+  ${S.platform !== 'wf' ? amzTrafficCard(f, t) : ''}
   <div class="grid g-2">
     ${card('By collection', 'Share of revenue', donut(grp('col').map(r => ({ label: r.k, v: r.rev, color: colColor(r.k), extra: [['Units', n0(r.units)], ['Net revenue', usd(r.net)]] })), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
     ${card('By product type', 'Single · Double · Floating · Rolling Cart', donut(grp('type').sort((x, y) => y.rev - x.rev).map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: n0(a.units), sub: 'units' }))}
@@ -729,6 +730,29 @@ function costAudit() {
     <h4 class="assump-h">Shared</h4>
     ${R('COGS', ex, 'FIFO by PO across both channels — Amazon units come out of the same CastleGate cost layers, so every unit is costed once.')}
   </div>`);
+}
+// Amazon Sales & Traffic business report: sessions, page views, conversion, Buy Box
+function amzTrafficCard(f, t) {
+  const T = D.amz && D.amz.traffic; if (!T || !(T.byDate || []).length) return '';
+  const C = SER(), rows = T.byDate.filter(r => r[0] >= f && r[0] <= t); if (!rows.length) return '';
+  const [pf, pt] = prevRange(), prevRows = T.byDate.filter(r => r[0] >= pf && r[0] <= pt);
+  const tot = rs => { const s = sum(rs, r => r[1]), pv = sum(rs, r => r[2]), u = sum(rs, r => r[3]), sales = sum(rs, r => r[4]), oi = sum(rs, r => r[5]); const bb = rs.filter(r => r[6] != null && r[1]); return { s, pv, u, sales, oi, conv: s ? oi / s : null, ucv: s ? u / s : null, bb: bb.length ? sum(bb, r => r[6] * r[1]) / sum(bb, r => r[1]) / 100 : null }; };
+  const a = tot(rows), b = prevRows.length ? tot(prevRows) : null;
+  const gran = autoGran(f, t), key = d => gran === 'month' ? d.slice(0, 7) : gran === 'week' ? addDays(d, -((new Date(d + 'T00:00:00Z').getUTCDay() + 6) % 7)) : d;
+  const lbl = k => gran === 'month' ? mLabel(k) : gran === 'week' ? 'Wk ' + dShort(k) : dShort(k);
+  const m = new Map([...new Set(daysOf(f, t).map(key))].map(k => [k, { label: lbl(k), tipLabel: gran === 'week' ? 'Week of ' + dLong(k) : dLong(k), s: 0, pv: 0, u: 0, oi: 0, sales: 0 }]));
+  for (const r of rows) { const x = m.get(key(r[0])); if (x) { x.s += r[1]; x.pv += r[2]; x.u += r[3]; x.oi += r[5]; x.sales += r[4]; } }
+  const bk = [...m.values()].map(x => ({ ...x, conv: x.s ? x.oi / x.s : null }));
+  const chart = combo3(bk, { bar: { k: 's', name: 'Sessions', axis: n0, color: C[1] }, line: { k: 'pv', name: 'Page views', short: 'Views', axis: n0, color: C[3] }, dash: { k: 'conv', name: 'Conversion (orders ÷ sessions)', fmt: v => pct(v, 1), color: C[4], min: 0.02 },
+    tip: x => [['Sessions', n0(x.s), C[1]], ['Page views', n0(x.pv), C[3]], ['Orders', n0(x.oi)], ['Units', n0(x.u)], ['Conversion', x.conv == null ? '—' : pct(x.conv, 1), C[4]], ['Ordered sales', usd(x.sales)]] }, { h: 340 });
+  const d = (x, y, o) => b ? delta(x, y, o) + ' ' + vsPrev() : '';
+  return `<div class="grid g-kpi">
+    ${kpi('Sessions', n0(a.s), d(a.s, b && b.s), 'Amazon Sales & Traffic report: unique visits to the listing (browser + app).', { vals: bk.map(x => x.s), color: C[1] })}
+    ${kpi('Page views', n0(a.pv), d(a.pv, b && b.pv), '', { vals: bk.map(x => x.pv), color: C[3] })}
+    ${kpi('Conversion', pct(a.conv, 1), `${b ? delta(a.conv, b.conv, { pp: true }) + ' ' + vsPrev() + ' · ' : ''}unit session ${pct(a.ucv, 1)}`, 'Order items ÷ sessions (Amazon calls units ÷ sessions "Unit Session Percentage").', { vals: bk.map(x => x.conv), color: C[4], dash: true })}
+    ${kpi('Featured offer (Buy Box)', pct(a.bb, 1), 'Share of page views where Lignarc won the Buy Box', 'Session-weighted Buy Box percentage.')}
+  </div>
+  ${card('Amazon traffic & conversion', `Bars = sessions · line = page views · dashed = conversion · Amazon Sales & Traffic report (Brand Analytics role), refreshed every sync · by ${gran}`, chart, { cls: 'big-chart' })}`;
 }
 // Amazon: every order's money flow, straight from the Finances transactions (estimate only until Amazon posts the order)
 function amzMoneyCard(f, t) {
