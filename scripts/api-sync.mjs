@@ -122,6 +122,31 @@ async function amazonTraffic(sinceDays) {
   if (PROBE) return { byDate: byDate.slice(-5), byAsin };
   return { v: 1, src: 'amazon-traffic', at: Math.floor(Date.now() / 1000), byDate, byAsin, from: day(end - sinceDays * 864e5), to: day(end) };
 }
+// ---------- Amazon SP-API: merchant-fulfilled returns (return requests, reasons, customer comments, SafeT claims, A-to-z) ----------
+async function amazonReturns(sinceDays) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0', 'content-type': 'application/json' }, base = 'https://sellingpartnerapi-na.amazon.com';
+  const rows = [], err = {};
+  // the report accepts at most 60 days per request
+  for (let to = Date.now(), n = 0; n < Math.ceil(sinceDays / 59); n++, to -= 59 * 864e5) {
+    const from = to - 59 * 864e5;
+    try {
+      const c = await http(`${base}/reports/2021-06-30/reports`, { method: 'POST', headers: H, body: JSON.stringify({ reportType: 'GET_FLAT_FILE_RETURNS_DATA_BY_RETURN_DATE', marketplaceIds: [MARKETPLACE], dataStartTime: new Date(from).toISOString(), dataEndTime: new Date(to).toISOString() }) });
+      let txt = null;
+      for (let i = 0; i < 40 && txt == null; i++) {
+        await sleep(12000); const r = await http(`${base}/reports/2021-06-30/reports/${c.reportId}`, { headers: H });
+        if (r.processingStatus === 'DONE') { const d = await http(`${base}/reports/2021-06-30/documents/${r.reportDocumentId}`, { headers: H }); const buf = Buffer.from(await (await fetch(d.url)).arrayBuffer()); txt = (d.compressionAlgorithm === 'GZIP' ? zlib.gunzipSync(buf) : buf).toString('utf8'); }
+        else if (/CANCELLED/.test(r.processingStatus)) txt = ''; // no data in the window
+        else if (/FATAL/.test(r.processingStatus)) throw new Error('returns report FATAL');
+      }
+      const lines = (txt || '').split(/\r?\n/).filter(Boolean); if (lines.length < 2) continue;
+      const hd = lines[0].split('\t').map(h => h.trim().toLowerCase());
+      const keep = ['order id', 'order date', 'return request date', 'return request status', 'amazon rma id', 'label type', 'label cost', 'return carrier', 'tracking id', 'label to be paid by', 'a-to-z claim', 'is prime', 'asin', 'merchant sku', 'return quantity', 'return reason', 'in policy', 'return type', 'resolution', 'return delivery date', 'order amount', 'order quantity', 'safet action reason', 'safet claim id', 'safet claim state', 'safet claim creation time', 'safet claim reimbursement amount', 'refunded amount', 'category', 'customer comments'];
+      for (const l of lines.slice(1)) { const v = l.split('\t'), o = {}; hd.forEach((h, i) => { if (keep.includes(h)) o[h.replace(/[^a-z0-9]+/g, '_')] = (v[i] || '').trim().slice(0, 600); }); rows.push(o); }
+    } catch (e) { err['w' + n] = String(e.message).slice(0, 200); }
+  }
+  return { v: 1, src: 'amazon-returns', at: Math.floor(Date.now() / 1000), rows, err };
+}
 // ---------- Amazon SP-API: Customer Feedback (review topics & star-rating trend per ASIN) — Brand Analytics role ----------
 async function amazonFeedback(asins) {
   const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
@@ -271,6 +296,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
   if (SP) jobs.push(['amazon-orders', () => T.daily ? amazonOrders(+(E.AMZ_ORDER_DAYS || 45)) : amazonOrders(3, 'LastUpdatedAfter')]);
   if (SP && T.hourly) jobs.push(['amazon-finances', () => amazonFinances(T.daily ? +(E.AMZ_FIN_DAYS || 400) : 60)]);
   if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)], ['amazon-listings', () => amazonListings(ASINS[0] || 'B0HJQQ3MY4')]);
+  if (SP && T.hourly) jobs.push(['amazon-returns', () => amazonReturns(T.daily ? 180 : 59)]);
   if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_REFRESH_TOKEN') && (E.AMZ_ADS_CLIENT_SECRET || E.AMZ_ADS_USE_SP_SECRET === '1')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) { E.WF_SKIP = [T.hourly ? '' : 'inb', T.six ? '' : 'ads,adsSku'].filter(Boolean).join(','); jobs.push(['wayfair', wayfair]); }
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }

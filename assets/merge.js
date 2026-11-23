@@ -27,6 +27,11 @@
       // Best Seller Rank / Buy Box snapshots: keep one row per ASIN per hour
       const rows = p.rows.map(r => [r.at.slice(0, 13), r.asin, (r.cls && r.cls[0]) || null, (r.disp && r.disp[0]) || null, r.myPrice ?? null, r.bbPrice ?? null, r.offers ?? null, r.myBB ?? null, r.lowest ?? null, r.sellers ?? null]);
       data.amz.rank = mergeBy(data.amz.rank, rows, r => r[0] + '|' + r[1]).sort((a, b) => a[0].localeCompare(b[0])).slice(-3000); res.rank = data.amz.rank.length; data.meta.amzCatalogAt = p.at; data.meta.amzCatalogErr = Object.keys(p.err || {}).length ? p.err : null;
+    } else if (p.src === 'amazon-returns') {
+      // merchant-fulfilled return requests, merged by RMA (or order + SKU)
+      const key = r => r.amazon_rma_id || (r.order_id + '|' + r.merchant_sku);
+      const m = new Map((data.amz.returns || []).map(r => [key(r), r])); for (const r of p.rows || []) m.set(key(r), r);
+      data.amz.returns = [...m.values()]; data.amz.returnsAt = p.at; res.returns = data.amz.returns.length;
     } else if (p.src === 'amazon-listings') {
       // full snapshot of every Amazon listing (content, images, portal issues, A+); keep a daily issue count history
       data.amz.listings = { at: p.at, rows: p.rows, aplus: p.aplus, req: p.req, err: Object.keys(p.err || {}).length ? p.err : null };
