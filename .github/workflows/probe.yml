@@ -17,7 +17,10 @@ jobs:
         env:
           WF_CLIENT_ID: ${{ secrets.WF_CLIENT_ID }}
           WF_CLIENT_SECRET: ${{ secrets.WF_CLIENT_SECRET }}
-        run: node scripts/api-sync.mjs --probe > probe.txt 2>&1 || true
+          AMZ_SP_CLIENT_ID: ${{ secrets.AMZ_SP_CLIENT_ID }}
+          AMZ_SP_CLIENT_SECRET: ${{ secrets.AMZ_SP_CLIENT_SECRET }}
+          AMZ_SP_REFRESH_TOKEN: ${{ secrets.AMZ_SP_REFRESH_TOKEN }}
+        run: node scripts/amz-fin-probe.mjs > probe.txt 2>&1 || true
       - name: Encrypt and commit
         env:
           LG_DK: ${{ secrets.LG_DK }}
