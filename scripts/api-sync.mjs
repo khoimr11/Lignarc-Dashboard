@@ -138,6 +138,46 @@ async function amazonFeedback(asins) {
   return { v: 1, src: 'amazon-feedback', at: Math.floor(Date.now() / 1000), items: out };
 }
 // ---------- Amazon SP-API: Best Seller Rank (Catalog) + Buy Box / offers (Pricing) per ASIN ----------
+// ---------- Amazon SP-API: every listing with content, images, issues (portal warnings), required attributes, A+ ----------
+async function amazonListings(knownAsin) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com', err = {};
+  let seller = E.AMZ_SELLER_ID;
+  if (!seller) { const o = await http(`${base}/products/pricing/v0/items/${knownAsin}/offers?MarketplaceId=${MARKETPLACE}&ItemCondition=New`, { headers: H }); const of = (o.payload && o.payload.Offers) || []; seller = (of.find(x => x.MyOffer) || {}).SellerId; await sleep(1500); }
+  if (!seller) throw new Error('seller id not found');
+  const items = []; let next = null;
+  for (let i = 0; i < 30; i++) {
+    const j = await http(`${base}/listings/2021-08-01/items/${seller}?marketplaceIds=${MARKETPLACE}&includedData=summaries,attributes,issues,offers,fulfillmentAvailability,relationships&pageSize=20${next ? '&pageToken=' + encodeURIComponent(next) : ''}`, { headers: H });
+    items.push(...(j.items || [])); next = j.pagination && j.pagination.nextToken; if (!next) break; await sleep(1200);
+  }
+  const v1 = (a, k) => { const x = (a[k] || [])[0]; return x == null ? null : x.value ?? x.media_location ?? x; };
+  const req = {};
+  for (const pt of [...new Set(items.map(it => ((it.summaries || [])[0] || {}).productType).filter(Boolean))]) {
+    try { const d = await http(`${base}/definitions/2020-09-01/productTypes/${pt}?marketplaceIds=${MARKETPLACE}&requirements=LISTING&locale=en_US`, { headers: H }); const sch = await (await fetch(d.schema.link.resource)).json(); req[pt] = sch.required || []; } catch (e) { err['ptd:' + pt] = e.message.slice(0, 160); }
+    await sleep(800);
+  }
+  const aplus = [];
+  try { const j = await http(`${base}/aplus/2020-11-01/contentDocuments?marketplaceId=${MARKETPLACE}`, { headers: H });
+    for (const d of j.contentMetadataRecords || []) { await sleep(700); let asins = []; try { const a = await http(`${base}/aplus/2020-11-01/contentDocuments/${d.contentReferenceKey}/asins?marketplaceId=${MARKETPLACE}`, { headers: H }); asins = (a.asinMetadataSet || []).map(x => x.asin); } catch (e) { }
+      aplus.push({ key: d.contentReferenceKey, name: d.contentMetadata.name, status: d.contentMetadata.status, badges: d.contentMetadata.badgeSet, updated: d.contentMetadata.updateTime, asins }); } } catch (e) { err.aplus = e.message.slice(0, 160); }
+  const rows = items.map(it => {
+    const s = (it.summaries || [])[0] || {}, a = it.attributes || {}, rel = ((it.relationships || [])[0] || {}).relationships || [];
+    const imgs = ['main_product_image_locator', ...Array.from({ length: 8 }, (_, i) => 'other_product_image_locator_' + (i + 1))].map(k => v1(a, k)).filter(Boolean);
+    const dims = v1(a, 'item_depth_width_height'), po = (a.purchasable_offer || []).find(x => x.audience === 'ALL'), pb = (a.purchasable_offer || []).find(x => x.audience === 'B2B');
+    const price = o => o && o.our_price ? o.our_price[0].schedule[0].value_with_tax : null;
+    const fa = (it.fulfillmentAvailability || []).find(x => x.fulfillmentChannelCode === 'DEFAULT');
+    return { sku: it.sku, asin: s.asin, pt: s.productType, status: s.status || [], name: s.itemName || v1(a, 'item_name'), created: (s.createdDate || '').slice(0, 10), updated: (s.lastUpdatedDate || '').slice(0, 10),
+      thumb: s.mainImage && s.mainImage.link, imgs, parent: (rel.find(r => r.parentSkus) || {}).parentSkus?.[0] || null, children: (rel.find(r => r.childSkus) || {}).childSkus || [], theme: ((rel[0] || {}).variationTheme || {}).theme || null,
+      level: v1(a, 'parentage_level'), color: v1(a, 'color'), size: v1(a, 'size'), style: v1(a, 'style'), material: (a.material || []).map(x => x.value).join(', ') || null, brand: v1(a, 'brand'),
+      bullets: (a.bullet_point || []).map(x => String(x.value).length), desc: String(v1(a, 'product_description') || '').length, kw: Buffer.byteLength(String(v1(a, 'generic_keyword') || '')),
+      dims: dims && dims.width ? [dims.width.value, dims.depth && dims.depth.value, dims.height && dims.height.value] : null, weight: (v1(a, 'item_weight') || {}).value ?? v1(a, 'item_weight'), pkgWeight: (v1(a, 'item_package_weight') || {}).value ?? null,
+      upc: (a.externally_assigned_product_identifier || []).map(x => x.type).join(',') || (v1(a, 'supplier_declared_has_product_identifier_exemption') ? 'exempt' : null), assembly: v1(a, 'is_assembly_required'), warranty: v1(a, 'warranty_description'), coo: v1(a, 'country_of_origin'),
+      list: (v1(a, 'list_price') || {}).value ?? null, price: price(po), b2b: price(pb), qty: fa ? fa.quantity : null,
+      has: Object.keys(a), missing: (req[s.productType] || []).filter(k => !a[k]),
+      issues: (it.issues || []).map(x => [x.severity, x.code, x.message.slice(0, 300), (x.attributeNames || []).join(','), (x.categories || []).join(',')]) };
+  });
+  return { v: 1, src: 'amazon-listings', at: Math.floor(Date.now() / 1000), rows, aplus, req, err };
+}
 async function amazonCatalog(asins) {
   const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
   const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com', rows = [], err = {};
@@ -229,7 +269,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
   const jobs = [];
   if (SP) jobs.push(['amazon-orders', () => T.daily ? amazonOrders(+(E.AMZ_ORDER_DAYS || 45)) : amazonOrders(3, 'LastUpdatedAfter')]);
   if (SP && T.hourly) jobs.push(['amazon-finances', () => amazonFinances(T.daily ? +(E.AMZ_FIN_DAYS || 400) : 60)]);
-  if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)]);
+  if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)], ['amazon-listings', () => amazonListings(ASINS[0] || 'B0HJQQ3MY4')]);
   if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) { E.WF_SKIP = [T.hourly ? '' : 'inb', T.six ? '' : 'ads,adsSku'].filter(Boolean).join(','); jobs.push(['wayfair', wayfair]); }
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }
