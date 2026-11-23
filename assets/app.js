@@ -97,9 +97,33 @@ function build() {
     const ts = r[17] || null, hd = ts ? etHourDow(ts) : null;
     lines.push({ ch: 'wf', po: r[0], date: ts ? vnDay(ts) : r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
   }
+  // Amazon (Seller Central, FBM shipped by CastleGate Multichannel): exact money from the SP-API Finances transactions
+  const FIN = (D.amz && D.amz.fin) || [], finBy = {}, amzSvc = [];
+  const leafSum = (lf, re) => Object.entries(lf || {}).reduce((a, [k, v]) => re.test(k) ? a + v : a, 0);
+  for (const t of FIN) {
+    const lf = t[9] || {}, date = vnDay(t[1]);
+    if (t[2] === 'Shipment' && t[4]) {
+      const o = finBy[t[4]] = finBy[t[4]] || { principal: 0, ship: 0, promo: 0, feeBase: 0, feeTax: 0, feeDisc: 0, other: 0, status: t[3], date };
+      o.principal += leafSum(lf, /^ProductCharges\/.*Principal/); o.ship += leafSum(lf, /^ProductCharges\/.*Shipping/);
+      o.promo -= leafSum(lf, /^PromoRebates\//);
+      o.feeBase -= leafSum(lf, /^AmazonFees\/[^/]+\/Base$/); o.feeTax -= leafSum(lf, /^AmazonFees\/[^/]+\/Tax$/); o.feeDisc += leafSum(lf, /^AmazonFees\/[^/]+\/Promo$/);
+      o.status = t[3];
+    } else if (t[2] === 'Refund' && t[4]) {
+      amzSvc.push({ date, kind: 'refund', order: t[4], sku: t[5], qty: t[6] || 0, amount: -t[7], lf });
+    } else if (t[2] === 'ProductAdsPayment') {
+      amzSvc.push({ date, kind: 'ads', amount: -t[7], base: -(lf.Base || 0), tax: -(lf.Tax || 0) });
+    } else if (t[2] === 'ServiceFee') {
+      const d = (t[8] || '').toLowerCase();
+      amzSvc.push({ date, kind: /subscription/.test(d) ? 'subscription' : /coupon|promotion|deal|lightning/.test(d) ? 'promoFee' : 'serviceFee', desc: t[8], amount: -t[7] });
+    }
+  }
+  const finOrders = Object.values(finBy).filter(o => o.principal > 0);
+  // effective Amazon fee on net sales observed so far (used only for orders Amazon has not charged yet)
+  A.amzFeeRate = finOrders.length ? sum(finOrders, o => o.feeBase + o.feeTax - o.feeDisc) / sum(finOrders, o => o.principal + o.ship - o.promo) : A.amazonFee;
   for (const r of (D.amz && D.amz.orders) || []) {
-    const qty = +r[5] || 0, price = +r[6] || 0;
-    lines.push({ ch: 'amz', po: r[0], date: r[1], ts: null, hour: null, dow: null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: '', country: 'US', part: r[3], qty, price, base: price, b2b: false, tt: false });
+    const qty = +r[5] || 0, price = +r[6] || 0, fo = finBy[r[0]], ts = r[11] || null, hd = ts ? etHourDow(ts) : null;
+    lines.push({ ch: 'amz', po: r[0], date: ts ? vnDay(ts) : r[1], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: '', country: 'US', part: r[3], qty, price, base: price, b2b: false, tt: false,
+      ship: fo ? fo.ship : (+r[10] || 0), promoAmt: fo ? fo.promo : (+r[9] || 0), fin: fo || null });
   }
   lines.sort((a, b) => (a.ts || a.date + 'T12').localeCompare(b.ts || b.date + 'T12'));
   // split each order line into FIFO pieces (Tried & True units ship from the same stock, so they consume layers too)
@@ -107,20 +131,27 @@ function build() {
   const mk = (l, q, ly) => {
     const p = prod(l.part), wf = l.ch === 'wf';
     // Tried & True: Wayfair pays no wholesale — only the DDA amount comes back; units still cost COGS + fulfillment
+    const base = { ...l, qty: q, layer: ly.po, unitCogs: ly.cogs, unitFob: ly.fob, cogs: ly.cogs * q, fob: ly.fob * q, col: p.col, cat: p.cat, type: p.type, size: p.size, color: p.color, name: p.name, fam: p.fam };
+    if (!wf) {
+      // Amazon seller: Revenue = GMV = item price × qty (+ shipping charged); Promotion = seller-funded promo rebates; NMV = net sales
+      const share = l.qty ? q / l.qty : 1, rev = l.price * q + (l.ship || 0) * share, promo = (l.promoAmt || 0) * share, net = rev - promo, fo = l.fin;
+      const fee = fo ? (fo.feeBase + fo.feeTax - fo.feeDisc) * share : net * A.amzFeeRate;
+      return { ...base, rev, gmv: rev, net, promo, dda: 0, cg: 0, cgEst: false, amzFee: fee, amzFeeEst: !fo, amzRef: fo ? fo.feeBase * share : net * 0.15, amzRefTax: fo ? fo.feeTax * share : 0, amzRefDisc: fo ? fo.feeDisc * share : 0,
+        mcf: A.amzMcf != null ? A.amzMcf * q : 0, mcfEst: A.amzMcf == null };
+    }
     const rev = l.tt ? 0 : l.base * q, paid = l.price * q, net = l.tt ? (A.ttReimburseDDA ? paid * A.dda : 0) : paid;
-    return { ...l, qty: q, layer: ly.po, unitCogs: ly.cogs, unitFob: ly.fob, rev, net, promo: l.tt ? 0 : rev - net, cogs: ly.cogs * q, fob: ly.fob * q,
-      dda: wf && !l.tt ? paid * A.dda : 0, cg: wf ? cgFee(l.part) * q : 0, cgEst: wf && !(CG.actual && CG.actual[l.part] != null), amzFee: wf ? 0 : net * A.amazonFee,
-      col: p.col, cat: p.cat, type: p.type, size: p.size, color: p.color, name: p.name, fam: p.fam };
+    // Wayfair: Revenue = base cost we submit; GMV = Revenue × 2 (Wayfair's retail mark-up); NMV = wholesale actually paid
+    return { ...base, rev, gmv: rev * 2, net, promo: l.tt ? 0 : rev - net, dda: !l.tt ? paid * A.dda : 0, cg: cgFee(l.part) * q, cgEst: !(CG.actual && CG.actual[l.part] != null), amzFee: 0, mcf: 0 };
   };
   for (const l of lines) {
-    if (!l.ok) { pieces.push({ ...mk(l, l.qty, { po: '—', cogs: 0, fob: 0 }), rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0 }); continue; }
+    if (!l.ok) { pieces.push({ ...mk(l, l.qty, { po: '—', cogs: 0, fob: 0 }), rev: 0, gmv: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0, mcf: 0 }); continue; }
     let q = l.qty; const L = layers[l.part] || [];
-    if (l.ch === 'wf') for (const ly of L) { if (q <= 0) break; if (ly.left <= 0) continue; const t = Math.min(q, ly.left); ly.left -= t; q -= t; pieces.push(mk(l, t, ly)); }
-    if (q > 0) { const lc = lastCost(l.part); pieces.push(mk(l, q, { po: l.ch === 'amz' ? 'Amazon stock' : 'Unassigned', cogs: lc.cogs, fob: lc.fob })); }
+    for (const ly of L) { if (q <= 0) break; if (ly.left <= 0) continue; const t = Math.min(q, ly.left); ly.left -= t; q -= t; pieces.push(mk(l, t, ly)); }
+    if (q > 0) { const lc = lastCost(l.part); pieces.push(mk(l, q, { po: 'Unassigned', cogs: lc.cogs, fob: lc.fob })); }
   }
   const deds = (D.deductions || []).map(d => ({ ...d, ch: 'wf' }));
   const dates = lines.map(l => l.date).filter(Boolean).sort();
-  M = { P, A, CG, cgFee, pos, layers, lines, pieces, deds, first: dates[0] || D.meta.today, today: [vnDay(new Date().toISOString()), (D.meta && D.meta.today) || ''].sort().pop() };
+  M = { P, A, CG, cgFee, pos, layers, lines, pieces, deds, amzSvc, finBy, first: dates[0] || D.meta.today, today: [vnDay(new Date().toISOString()), (D.meta && D.meta.today) || ''].sort().pop() };
   M.listingParts = {}; for (const [k, p] of Object.entries(P)) if (p.fam) (M.listingParts[p.fam] = M.listingParts[p.fam] || []).push(k);
 }
 
@@ -150,19 +181,20 @@ function basePieces({ includeBad = false, ignoreTT = false, ignoreProd = false, 
 }
 const inRange = (x, f, t) => x.date >= f && x.date <= t;
 function agg(ps) {
-  const o = { units: 0, rev: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0, ttUnits: 0, ttCost: 0, ttCogs: 0, ttCg: 0, ttBack: 0 }, orders = new Set(), ttOrders = new Set();
+  const o = { units: 0, rev: 0, gmv: 0, net: 0, promo: 0, cogs: 0, fob: 0, dda: 0, cg: 0, amzFee: 0, amzFeeEst: 0, mcf: 0, ttUnits: 0, ttCost: 0, ttCogs: 0, ttCg: 0, ttBack: 0 }, orders = new Set(), ttOrders = new Set();
   for (const x of ps) {
     if (x.tt) { o.ttUnits += x.qty; o.ttCogs += x.cogs; o.ttCg += x.cg; o.ttBack += x.net; o.ttCost += x.cogs + x.cg - x.net; ttOrders.add(x.po); continue; }
-    o.units += x.qty; o.rev += x.rev; o.net += x.net; o.promo += x.promo; o.cogs += x.cogs; o.fob += x.fob; o.dda += x.dda; o.cg += x.cg; o.amzFee += x.amzFee; orders.add(x.po);
+    o.units += x.qty; o.rev += x.rev; o.gmv += x.gmv || 0; o.net += x.net; o.promo += x.promo; o.cogs += x.cogs; o.fob += x.fob; o.dda += x.dda; o.cg += x.cg; o.amzFee += x.amzFee; if (x.amzFeeEst) o.amzFeeEst += x.amzFee; o.mcf += x.mcf || 0; orders.add(x.po);
   }
-  o.orders = orders.size; o.ttOrders = ttOrders.size; o.gmv = o.rev * 2; o.aov = o.orders ? o.rev / o.orders : 0;
-  o.platform = o.dda + o.cg + o.amzFee;                       // what the platform takes: DDA 4% + CastleGate fulfillment (+ Amazon fees)
+  o.orders = orders.size; o.ttOrders = ttOrders.size; o.aov = o.orders ? o.rev / o.orders : 0;
+  o.platform = o.dda + o.cg + o.amzFee + o.mcf;               // what the platforms take: Wayfair DDA 4% + CastleGate fulfillment · Amazon referral fee + CastleGate Multichannel
   o.gp = o.net - o.platform - o.cogs - o.ttCost;              // before returns, incidents and ads
   return o;
 }
 // Wayfair deductions for returns (WMR) and incidents, by deduction date
 function deductions(f, t) {
-  const ds = S.platform === 'amz' ? [] : M.deds.filter(d => d.date >= f && d.date <= t && passProd(d.part));
+  const amzRef = M.amzSvc.filter(x => x.kind === 'refund').map(x => ({ ch: 'amz', type: 'Return', part: x.sku, po: x.order, date: x.date, amount: x.amount, reason: 'Amazon refund' }));
+  const ds = [...M.deds, ...amzRef].filter(d => (S.platform === 'all' || d.ch === S.platform) && d.date >= f && d.date <= t && passProd(d.part));
   return { list: ds, returns: sum(ds.filter(d => d.type === 'Return'), d => d.amount), incidents: sum(ds.filter(d => d.type !== 'Return'), d => d.amount), returnUnits: ds.filter(d => d.type === 'Return').length };
 }
 
@@ -190,6 +222,11 @@ function ads(f, t) {
     }
     if (!skuTotal && out.spend) out.unalloc = out.spend;
   }
+  if (S.platform !== 'wf' && !((D.amz && D.amz.ads && D.amz.ads.daily) || []).length) {
+    // no Ads API yet: use what Amazon actually billed for Sponsored Products (Finances 'ProductAdsPayment', incl. tax) on the billing date
+    for (const x of M.amzSvc) if (x.kind === 'ads' && x.date >= f && x.date <= t) { out.spend += x.amount; out.amzBilled = (out.amzBilled || 0) + x.amount; out.byPart['5C8N'] = (out.byPart['5C8N'] || 0) + x.amount;
+      const d = out.daily.get(x.date) || { spend: 0, sales: 0, clicks: 0, impr: 0, orders: 0 }; d.spend += x.amount; out.daily.set(x.date, d); }
+  }
   if (S.platform !== 'wf') {
     const A = (D.amz && D.amz.ads) || {};
     for (const r of A.daily || []) { if (r[0] < f || r[0] > t) continue; out.spend += r[3]; out.impr += r[1]; out.clicks += r[2]; out.sales += r[4]; out.orders += r[5];
@@ -205,6 +242,10 @@ function ads(f, t) {
 function period(f, t) {
   const all = basePieces().filter(x => inRange(x, f, t)), ps = all.filter(x => !x.tt), a = agg(all), ad = ads(f, t), dd = deductions(f, t);
   a.ads = ad.filtered; a.returns = dd.returns; a.incidents = dd.incidents; a.returnUnits = dd.returnUnits;
+  // Amazon account-level fees hit the period when Amazon charges them; they count only when no product filter narrows the view
+  const svc = S.platform === 'wf' || prodFilterOn() || S.f.po.size ? [] : M.amzSvc.filter(x => x.date >= f && x.date <= t);
+  a.amzSub = sum(svc.filter(x => x.kind === 'subscription'), x => x.amount); a.amzPromoFee = sum(svc.filter(x => x.kind === 'promoFee'), x => x.amount); a.amzSvcOther = sum(svc.filter(x => x.kind === 'serviceFee'), x => x.amount);
+  a.amzAccount = a.amzSub + a.amzPromoFee + a.amzSvcOther; a.platform += a.amzAccount; a.gp -= a.amzAccount;
   a.mkt = a.promo + a.ads; a.mktPct = a.rev ? a.mkt / a.rev : null;
   a.profit = a.gp - a.returns - a.incidents - a.ads; a.margin = a.rev ? a.profit / a.rev : null; a.tacos = a.rev ? a.ads / a.rev : null; a.costs = a.rev - a.profit;
   return { ps, all, a, ad, dd };
@@ -473,8 +514,8 @@ function viewOverview() {
     </div>
   </section>
   <div class="grid g-kpi">
-    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}${tgt ? ` · ${pct(a.rev / tgt)} of target` : ''}`, 'Wayfair base cost × units (before promotion) — same basis as the KPI "Rev" line.')}
-    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Net revenue: the wholesale price Wayfair actually pays after promotion funding.')}
+    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}${tgt ? ` · ${pct(a.rev / tgt)} of target` : ''}`, 'Wayfair: base cost we submit × units (before promotion) — same basis as the KPI "Rev" line. Amazon: our selling price × units (+ shipping charged), before promotions.')}
+    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Wayfair: the wholesale price Wayfair actually pays after promotion funding. Amazon: net sales after seller-funded coupons and promotions (sales tax excluded).')}
     ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()} · ${n0(a.orders)} orders`)}
     ${kpi('Profit', usd(a.profit), `${delta(a.profit, b.profit)} ${vsPrev()}`, 'NMV − platform fees (DDA 4% + CastleGate fulfillment) − COGS (FIFO by PO) − Tried & True cost − return & incident deductions − ad spend.')}
     ${kpi('Profit Margin', pct(a.margin, 1), `${delta(a.margin, b.margin, { pp: true })} ${vsPrev()}`, 'Profit ÷ Revenue')}
@@ -531,10 +572,10 @@ function viewSales() {
   <div class="grid g-kpi">
     ${kpi('Units Sold', n0(a.units), `${delta(a.units, b.units)} ${vsPrev()}`)}
     ${kpi('Orders', n0(a.orders), `${delta(a.orders, b.orders)} ${vsPrev()}`)}
-    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`, 'Base cost × units')}
-    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Net revenue: wholesale price actually paid')}
-    ${kpi('Promotion', usd(a.promo), `${pct(a.rev ? a.promo / a.rev : null, 1)} of revenue · ${delta(a.promo, b.promo, { invert: true })}`, 'Revenue − Net Revenue (Wayfair promotion funding)')}
-    ${kpi('GMV', usd(a.gmv), `${delta(a.gmv, b.gmv)} ${vsPrev()}`, 'Revenue × 2 (estimated consumer spend)')}
+    ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`, 'Wayfair: base cost × units. Amazon: selling price × units (+ shipping charged).')}
+    ${kpi('NMV', usd(a.net), `${delta(a.net, b.net)} ${vsPrev()}`, 'Wayfair: wholesale price paid. Amazon: net sales after promotions.')}
+    ${kpi('Promotion', usd(a.promo), `${pct(a.rev ? a.promo / a.rev : null, 1)} of revenue · ${delta(a.promo, b.promo, { invert: true })}`, 'Revenue − NMV. Wayfair: promotion funding. Amazon: coupons, Buy X Get Y and other seller-funded rebates.')}
+    ${kpi('GMV', usd(a.gmv), `${delta(a.gmv, b.gmv)} ${vsPrev()}`, 'Consumer spend. Wayfair: Revenue × 2 (Wayfair lists at about twice our base cost). Amazon: we are the retailer, so GMV = Revenue (listing price × units).')}
     ${kpi('Avg. Order Value', usd(a.aov), `${delta(a.aov, b.aov)} ${vsPrev()}`, 'Revenue ÷ orders')}
     ${kpi('Returns', n0(cur.a.returnUnits) + '<small>units</small>', `${usd(cur.a.returns)} deducted · ${n0(sum(bad, x => x.qty))} cancelled/rejected`)}
   </div>
@@ -562,13 +603,13 @@ function viewSales() {
 function viewProfit() {
   const [f, t] = range(), [pf, pt] = prevRange(), C = SER(), A = M.A;
   const cur = period(f, t), prev = period(pf, pt), a = cur.a, b = prev.a;
-  const steps = [{ label: 'Revenue', v: a.rev, kind: 'total' }, { label: 'Promotion', v: a.promo }, { label: 'DDA 4%', v: a.dda }, { label: 'Fulfillment', v: a.cg }, { label: 'COGS (landed)', v: a.cogs }, { label: 'Tried & True', v: a.ttCost }, { label: 'Returns', v: a.returns }, { label: 'Incidents', v: a.incidents }, { label: 'Ad spend', v: a.ads }, { label: 'Profit', v: a.profit, kind: 'total' }]
+  const steps = [{ label: 'Revenue', v: a.rev, kind: 'total' }, { label: 'Promotion', v: a.promo }, { label: 'DDA 4%', v: a.dda }, { label: 'Fulfillment', v: a.cg }, { label: 'Amazon fees', v: a.amzFee + a.amzAccount }, { label: 'Multichannel', v: a.mcf }, { label: 'COGS (landed)', v: a.cogs }, { label: 'Tried & True', v: a.ttCost }, { label: 'Returns', v: a.returns }, { label: 'Incidents', v: a.incidents }, { label: 'Ad spend', v: a.ads }, { label: 'Profit', v: a.profit, kind: 'total' }]
     .filter(s => s.kind || Math.abs(s.v) > 0.005).map(s => ({ ...s, share: a.rev ? s.v / a.rev : null }));
   const dedBy = groupBy(cur.dd.list, d => d.part);
   const parts = new Set([...cur.all.map(x => x.part), ...cur.dd.list.map(d => d.part)]);
   const byPart = [...parts].map(part => { const ps = cur.all.filter(x => x.part === part), g = agg(ps), adsP = cur.ad.byPart[part] || 0, p = M.P[part] || {}, dl = dedBy.get(part) || [];
     const ret = sum(dl.filter(d => d.type === 'Return'), d => d.amount), inc = sum(dl.filter(d => d.type !== 'Return'), d => d.amount), profit = g.gp - ret - inc - adsP;
-    return { part, col: p.col, layers: [...new Set(ps.map(x => x.layer))].join(', '), units: g.units, rev: g.rev, promo: g.promo, net: g.net, dda: g.dda, cg: g.cg, cgEst: ps.some(x => x.cgEst), cogs: g.cogs, unitCogs: g.units ? g.cogs / g.units : 0, tt: g.ttCost, ret, inc, ads: adsP, mkt: g.promo + adsP, profit, margin: g.rev ? profit / g.rev : null, perUnit: g.units ? profit / g.units : 0 }; });
+    return { part, col: p.col, layers: [...new Set(ps.map(x => x.layer))].join(', '), units: g.units, rev: g.rev, promo: g.promo, net: g.net, dda: g.dda, cg: g.cg, amz: g.amzFee + g.mcf, cgEst: ps.some(x => x.cgEst), cogs: g.cogs, unitCogs: g.units ? g.cogs / g.units : 0, tt: g.ttCost, ret, inc, ads: adsP, mkt: g.promo + adsP, profit, margin: g.rev ? profit / g.rev : null, perUnit: g.units ? profit / g.units : 0 }; });
   const soldParts = new Set(byPart.map(r => r.part)); const idle = sum(Object.entries(cur.ad.byPart).filter(([p]) => !soldParts.has(p) && passProd(p)), ([, v]) => v) + (prodFilterOn() || S.f.po.size ? 0 : cur.ad.unalloc);
   if (idle > 0.5) byPart.push({ part: 'Ads on SKUs with no sales', col: '', layers: '', units: 0, rev: 0, promo: 0, net: 0, dda: 0, cg: 0, cogs: 0, tt: 0, ret: 0, inc: 0, ads: idle, mkt: idle, profit: -idle, margin: null, perUnit: 0, idle: true });
   const byCol = [...groupBy(byPart.filter(r => r.col), r => r.col)].map(([k, rs]) => ({ k, rev: sum(rs, r => r.rev), profit: sum(rs, r => r.profit) }));
@@ -578,8 +619,8 @@ function viewProfit() {
   return `${pageHead('Profit')}
   <div class="grid g-kpi">
     ${kpi('Revenue', usd(a.rev), `${delta(a.rev, b.rev)} ${vsPrev()}`)}
-    ${kpi('NMV', usd(a.net), `after ${usd(a.promo)} promotion`, 'Net revenue = wholesale price paid by Wayfair')}
-    ${kpi('Platform fees', usd(a.platform), `DDA 4% ${usd(a.dda)} · fulfillment ${usd(a.cg)}`, 'Verified in Partner Home: DDA 4% of the wholesale price on every order (Returns Management) + CastleGate Fulfillment fee per unit shipped (Accounts Payable invoice). Storage is free for the first 90 days.')}
+    ${kpi('NMV', usd(a.net), `after ${usd(a.promo)} promotion`, 'Wayfair: wholesale price paid. Amazon: net sales after seller-funded promotions (excl. sales tax, which Amazon collects and remits).')}
+    ${kpi('Platform fees', usd(a.platform), [S.platform !== 'amz' ? `DDA 4% ${usd(a.dda)} · fulfillment ${usd(a.cg)}` : '', S.platform !== 'wf' ? `Amazon ${usd(a.amzFee + a.amzAccount)}${a.amzFeeEst > 0.5 ? '*' : ''}` : ''].filter(Boolean).join(' · '), 'Wayfair (verified in Partner Home): DDA 4% of wholesale + CastleGate fulfillment per unit. Amazon (SP-API Finances, exact): referral fee 15% + tax on the fee − Amazon referral-fee discount, plus account fees in the period (Professional plan $39.99 + tax/month, coupon & promotion fees). * includes an estimate for orders Amazon has not charged yet.')}
     ${kpi('COGS (landed, FIFO)', usd(a.cogs), `${pct(a.rev ? a.cogs / a.rev : null, 1)} of revenue · FOB ${usd(a.fob)}`, 'PO cost sheet landed cost + CastleGate container unload per unit, consumed first-in-first-out by PO.')}
     ${kpi('Mkt Fee', usd(a.mkt), `${pct(a.mktPct, 1)} of revenue · promo ${usd(a.promo)} + ads ${usd(a.ads)}`, 'Promotion + Ad spend')}
     ${kpi('Returns & incidents', usd(a.returns + a.incidents), `${n0(a.returnUnits)} return${a.returnUnits === 1 ? '' : 's'} · incidents ${usd(a.incidents)}`, 'Actual Wayfair deductions. Returns are Wayfair-Managed: deduction = wholesale × (1 − 4% DDA) × 75% WMR rate.')}
@@ -590,22 +631,47 @@ function viewProfit() {
   ${card('Profit by SKU', 'COGS from the PO layer each unit came from · fulfillment from the CastleGate invoice (* = rate of the same carton class, not invoiced yet) · ads from the Wayfair SKU report', table('psku', [
     { k: 'part', l: 'SKU', f: (v, r) => r.idle ? `<i class="sub">${esc(v)}</i>` : skuCell(v) }, { k: 'units', l: 'Units', num: true, f: v => n0(v) }, { k: 'rev', l: 'Revenue', num: true, f: money },
     { k: 'profit', l: 'Profit', num: true, neg: true, f: v => `<b>${usd(v)}</b>` }, { k: 'margin', l: 'Margin', num: true, neg: true, f: v => pct(v, 1) }, { k: 'perUnit', l: 'Profit / unit', num: true, neg: true, f: m2 },
-    { k: 'promo', l: 'Promotion', num: true, f: money }, { k: 'net', l: 'NMV', num: true, f: money }, { k: 'dda', l: 'DDA 4%', num: true, f: money }, { k: 'cg', l: 'Fulfillment', num: true, f: (v, r) => usd(v, 2) + (r.cgEst ? '*' : '') },
+    { k: 'promo', l: 'Promotion', num: true, f: money }, { k: 'net', l: 'NMV', num: true, f: money }, { k: 'dda', l: 'DDA 4%', num: true, f: money }, { k: 'cg', l: 'Fulfillment', num: true, f: (v, r) => usd(v, 2) + (r.cgEst ? '*' : '') }, { k: 'amz', l: 'Amazon fees', num: true, f: m2 },
     { k: 'cogs', l: 'COGS', num: true, f: money }, { k: 'unitCogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'tt', l: 'T&T cost', num: true, f: money }, { k: 'ret', l: 'Returns', num: true, f: money }, { k: 'inc', l: 'Incidents', num: true, f: money }, { k: 'ads', l: 'Ads', num: true, f: money }, { k: 'mkt', l: 'Mkt fee', num: true, f: money }, { k: 'layers', l: 'PO layer' }], byPart,
-    { def: { k: 'profit', d: 'desc' }, foot: { part: 'Total', layers: '', units: a.units, rev: a.rev, promo: a.promo, net: a.net, dda: a.dda, cg: a.cg, cogs: a.cogs, unitCogs: a.units ? a.cogs / a.units : 0, tt: a.ttCost, ret: a.returns, inc: a.incidents, ads: a.ads, mkt: a.mkt, profit: a.profit, margin: a.margin, perUnit: a.units ? a.profit / a.units : 0 } }))}
+    { def: { k: 'profit', d: 'desc' }, foot: { part: 'Total', layers: '', units: a.units, rev: a.rev, promo: a.promo, net: a.net, dda: a.dda, cg: a.cg, amz: a.amzFee + a.mcf, cogs: a.cogs, unitCogs: a.units ? a.cogs / a.units : 0, tt: a.ttCost, ret: a.returns, inc: a.incidents, ads: a.ads, mkt: a.mkt, profit: a.profit, margin: a.margin, perUnit: a.units ? a.profit / a.units : 0 } }))}
   <div class="grid g-2">
     ${card('Profit margin by collection', 'Profit ÷ revenue · red = loss', hbars(byCol.filter(r => r.rev).sort((x, y) => y.profit / y.rev - x.profit / x.rev).map(r => ({ label: r.k, v: r.profit / r.rev, sub: usd(r.profit), color: colColor(r.k), extra: [['Revenue', usd(r.rev)], ['Profit', usd(r.profit)]] })), { fmt: v => pct(v, 1) }))}
     ${card('Profit by product type', '', hbars(byType.sort((x, y) => y.profit - x.profit).map(r => ({ label: r.k, v: r.profit, sub: pct(r.rev ? r.profit / r.rev : null), extra: [['Revenue', usd(r.rev)], ['Margin', pct(r.rev ? r.profit / r.rev : null, 1)]] })), { fmt: usd, color: C[2] }))}
   </div>
-  ${cur.dd.list.length ? card('Wayfair deductions', 'Returns and incidents charged back in this period', table('ded', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'type', l: 'Type', f: v => `<span class="tag ${v === 'Return' ? '' : 'bad'}">${esc(v)}</span>` }, { k: 'reason', l: 'Reason' }, { k: 'amount', l: 'Amount', num: true, f: v => usd(v, 2) }, { k: 'note', l: 'Note' }], cur.dd.list, { def: { k: 'date', d: 'desc' } })) : ''}
+  ${S.platform !== 'wf' ? amzMoneyCard(f, t) : ''}
+  ${cur.dd.list.length ? card('Deductions & refunds', 'Returns and incidents charged back in this period', table('ded', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'type', l: 'Type', f: v => `<span class="tag ${v === 'Return' ? '' : 'bad'}">${esc(v)}</span>` }, { k: 'reason', l: 'Reason' }, { k: 'amount', l: 'Amount', num: true, f: v => usd(v, 2) }, { k: 'note', l: 'Note' }], cur.dd.list, { def: { k: 'date', d: 'desc' } })) : ''}
   ${card('FIFO cost layers', 'Each PO shipment is a cost layer; units sell from the oldest layer first. All-time.', table('fifo', [
     { k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'po', l: 'PO' }, { k: 'recv', l: 'Received', f: v => dLong(v) }, { k: 'qty', l: 'Qty in', num: true }, { k: 'sold', l: 'Sold', num: true }, { k: 'left', l: 'Remaining', num: true }, { k: 'st', l: 'Sell-through', num: true, f: v => `${pct(v)}<span class="mini-bar" style="width:${Math.round(v * 50)}px"></span>` },
     { k: 'fob', l: 'FOB', num: true, f: m2 }, { k: 'sheet', l: 'Landed (sheet)', num: true, f: m2 }, { k: 'unload', l: 'Unload', num: true, f: m2 }, { k: 'cogs', l: 'COGS / unit', num: true, f: m2 }, { k: 'value', l: 'Stock value', num: true, f: money }], fifo, { def: { k: 'value', d: 'desc' } }))}
-  ${card('How each cost is calculated', 'Every rate below was checked in Wayfair Partner Home on Nov 13, 2026', `<div class="assump">
+  ${card('How each cost is calculated', 'Wayfair rates checked in Partner Home (Nov 13) · Amazon fees read from Seller Central transactions (Nov 23)', `<div class="assump">
       <div><span>Revenue</span><b>Base cost × units</b></div><div><span>NMV (net revenue)</span><b>Wholesale price paid</b></div><div><span>Promotion</span><b>Revenue − NMV</b></div><div><span>GMV</span><b>Revenue × 2</b></div>
       <div><span>DDA (Damage &amp; Defect Allowance)</span><b>${pct(A.dda, 1)} of wholesale paid</b></div><div><span>CastleGate fulfillment</span><b>Per unit by carton class</b></div><div><span>CastleGate storage</span><b>$0 for first 90 days</b></div><div><span>Container unload</span><b>Per unit, in COGS</b></div>
       <div><span>Returns (Wayfair-Managed)</span><b>Paid × (1 − DDA) × ${pct(A.wmr)}</b></div><div><span>Incidents</span><b>Actual deductions</b></div><div><span>Tried &amp; True</span><b>COGS + fulfillment − DDA back</b></div><div><span>Mkt fee</span><b>Promotion + ads</b></div></div>
+      <h4 class="assump-h">Amazon (Seller Central · FBM shipped by CastleGate Multichannel) — from the SP-API Finances transactions</h4>
+      <div class="assump">
+      <div><span>Revenue = GMV</span><b>Item price × units (+ shipping charged)</b></div><div><span>Promotion</span><b>Seller-funded rebates (coupon, Buy X Get Y)</b></div><div><span>NMV (net sales)</span><b>Revenue − Promotion</b></div><div><span>Sales tax</span><b>Excluded (Amazon remits it)</b></div>
+      <div><span>Referral fee</span><b>15% of net sales + ~3.4% tax on the fee</b></div><div><span>Referral-fee discount</span><b>Amazon credits back ⅔ of the fee</b></div><div><span>Effective Amazon fee</span><b>${pct(A.amzFeeRate, 1)} of net sales</b></div><div><span>Professional plan</span><b>$39.99 + tax / month</b></div>
+      <div><span>Coupon fee</span><b>$5 per coupon + 2.5% of coupon sales</b></div><div><span>Ads (until Ads API)</span><b>Amazon's billed ad charges</b></div><div><span>Refunds</span><b>Actual Amazon refund transactions</b></div><div><span>Multichannel (CastleGate Pick &amp; Ship)</span><b>${A.amzMcf != null ? usd(A.amzMcf, 2) + ' / unit' : 'Pending first Wayfair invoice'}</b></div></div>
+      <p class="note"><b>Amazon, checked in Seller Central on Nov 23, 2026:</b> every Amazon order is shipped from CastleGate Cranbury via Wayfair Multichannel ("Pick &amp; Ship"), so its units come out of the same FIFO cost layers as Wayfair orders. Wayfair bills the Multichannel pick &amp; ship and the FedEx label on the CastleGate invoice after the month closes — those costs are <b>not included yet</b>, so Amazon profit is shown before Multichannel fulfillment until the December invoice arrives. Amazon holds order payments ~2 weeks after delivery (deferred) before releasing them.</p>
       <p class="note"><b>Fulfillment per unit (Oct invoice 1695394):</b> ${Object.entries(CGa).map(([k, v]) => `${k} $${v.toFixed(2)}`).join(' · ')}. Storage after day 90 is charged daily from the CastleGate storage rate card — it starts on ${dLong(addDays(M.pos[0] && M.pos[0].recv || M.today, 90))} for the 1st Shipment. No co-op or other platform percentage appears on the CastleGate invoice or in Returns Management.</p>`)}`;
+}
+
+// Amazon: every order's money flow, straight from the Finances transactions (estimate only until Amazon posts the order)
+function amzMoneyCard(f, t) {
+  const ls = M.lines.filter(l => l.ch === 'amz' && l.ok && l.date >= f && l.date <= t && passProd(l.part));
+  const rows = ls.map(l => { const fo = l.fin, sales = l.price * l.qty + (l.ship || 0), promo = l.promoAmt || 0, net = sales - promo;
+    const ref = fo ? fo.feeBase : net * 0.15, tax = fo ? fo.feeTax : null, disc = fo ? fo.feeDisc : null, fee = fo ? ref + tax - disc : net * M.A.amzFeeRate;
+    return { po: l.po, date: l.date, part: l.part, qty: l.qty, sales, promo, net, ref, tax, disc, fee, payout: net - fee, status: fo ? (fo.status === 'DEFERRED' ? 'Deferred' : 'Released') : 'Not charged yet', est: !fo }; });
+  const svc = M.amzSvc.filter(x => x.date >= f && x.date <= t && x.kind !== 'refund');
+  const svcRows = svc.map(x => ({ date: x.date, what: x.kind === 'ads' ? 'Sponsored Products charge' : x.kind === 'subscription' ? 'Professional selling plan' : (x.desc || x.kind), amount: x.amount, detail: x.kind === 'ads' ? `${usd(x.base, 2)} + tax ${usd(x.tax, 2)}` : '' }));
+  const m2 = v => v == null ? '—' : usd(v, 2);
+  return card('Amazon money flow', 'Per order from Seller Central transactions: sales → promotion → referral fee 15% + tax − Amazon discount → payout. Sales tax is collected and remitted by Amazon, so it is excluded.', table('amzflow', [
+    { k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'Order' }, { k: 'qty', l: 'Units', num: true }, { k: 'sales', l: 'Sales', num: true, f: m2 }, { k: 'promo', l: 'Promotion', num: true, f: m2 }, { k: 'net', l: 'Net sales', num: true, f: m2 },
+    { k: 'ref', l: 'Referral 15%', num: true, f: (v, r) => m2(v) + (r.est ? '*' : '') }, { k: 'tax', l: 'Fee tax', num: true, f: m2 }, { k: 'disc', l: 'Fee discount', num: true, f: m2 }, { k: 'fee', l: 'Amazon fee', num: true, f: (v, r) => `<b>${m2(v)}</b>${r.est ? '*' : ''}` },
+    { k: 'payout', l: 'Payout', num: true, f: m2 }, { k: 'status', l: 'Payment', f: v => `<span class="tag ${v === 'Released' ? '' : v === 'Deferred' ? 'tt' : 'bad'}">${esc(v)}</span>` }], rows,
+    { def: { k: 'date', d: 'desc' }, foot: { date: '', po: 'Total', qty: sum(rows, r => r.qty), sales: sum(rows, r => r.sales), promo: sum(rows, r => r.promo), net: sum(rows, r => r.net), ref: sum(rows, r => r.ref), tax: null, disc: null, fee: sum(rows, r => r.fee), payout: sum(rows, r => r.payout), status: '' } })
+    + (svcRows.length ? `<h4 class="assump-h">Account charges in this period</h4>` + table('amzsvc', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'what', l: 'Charge' }, { k: 'detail', l: 'Detail' }, { k: 'amount', l: 'Amount', num: true, f: v => usd(v, 2) }], svcRows, { def: { k: 'date', d: 'desc' } }) : '')
+    + `<p class="note">* Amazon has not posted this order yet: fee estimated at the ${pct(M.A.amzFeeRate, 1)} effective rate of posted orders. Deferred = Amazon holds the payment until ~2 weeks after delivery.</p>`);
 }
 
 function viewCustomers() {

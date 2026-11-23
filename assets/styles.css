@@ -374,3 +374,4 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .install-btn{width:auto;border-radius:999px;padding:0 12px;gap:6px;display:inline-flex;align-items:center;font-weight:650;font-size:13px}
 .install-btn[hidden]{display:none}
 @media (max-width:760px){.install-btn span{display:none}.install-btn{padding:0;width:var(--btn,38px)}}
+.assump-h{margin:18px 0 8px;font-size:14px;font-weight:700}
