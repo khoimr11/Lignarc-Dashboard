@@ -22,6 +22,8 @@
       data.meta.wfAt = p.at; data.meta.wfErr = p.err || null;
     } else if (p.src === 'amazon-orders') {
       data.amz.orders = mergeBy(data.amz.orders, p.orders, r => r[0] + '|' + r[3]).sort((a, b) => (b[1] || '').localeCompare(a[1] || '')); res.orders = data.amz.orders.length; data.meta.amzOrdersAt = p.at;
+    } else if (p.src === 'amazon-feedback') {
+      data.amz.feedback = { at: p.at, items: p.items }; res.feedback = Object.keys(p.items).length;
     } else if (p.src === 'amazon-traffic') {
       const old = (data.amz.traffic && data.amz.traffic.byDate) || [];
       data.amz.traffic = { byDate: mergeBy(old, p.byDate, r => r[0]).sort((a, b) => a[0].localeCompare(b[0])), byAsin: p.byAsin, from: p.from, to: p.to }; res.traffic = p.byDate.length; data.meta.amzTrafficAt = p.at;

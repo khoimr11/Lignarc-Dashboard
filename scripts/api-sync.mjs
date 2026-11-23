@@ -63,7 +63,9 @@ async function amazonOrders(sinceDays) {
       const amt = x => x ? +x.Amount || 0 : 0;
       // [0 order, 1 date, 2 status, 3 sku, 4 asin, 5 qty, 6 unit price, 7 title, 8 channel, 9 promo discount (item+ship), 10 shipping charged, 11 purchase ts UTC]
       rows.push([o.AmazonOrderId, (o.PurchaseDate || '').slice(0, 10), o.OrderStatus, i.SellerSKU, i.ASIN, q, q ? Math.round(price / q * 100) / 100 : price, (i.Title || '').slice(0, 90), o.FulfillmentChannel === 'AFN' ? 'afn' : 'mfn',
-        Math.round((amt(i.PromotionDiscount) + amt(i.ShippingDiscount)) * 100) / 100, amt(i.ShippingPrice), o.PurchaseDate || '']);
+        Math.round((amt(i.PromotionDiscount) + amt(i.ShippingDiscount)) * 100) / 100, amt(i.ShippingPrice), o.PurchaseDate || '',
+        // 12 ship-to state, 13 country, 14 business order — non-PII address fields only (no name, street or phone)
+        (o.ShippingAddress && o.ShippingAddress.StateOrRegion) || '', (o.ShippingAddress && o.ShippingAddress.CountryCode) || 'US', o.IsBusinessOrder ? 'yes' : '']);
     }
   }
   return { v: 1, src: 'amazon-orders', at: Math.floor(Date.now() / 1000), orders: rows };
@@ -117,6 +119,21 @@ async function amazonTraffic(sinceDays) {
   const byAsin = (j.salesAndTrafficByAsin || []).map(x => { const S = x.salesByAsin || {}, T = x.trafficByAsin || {}; return [x.childAsin || x.parentAsin, x.sku || null, T.sessions || 0, T.pageViews || 0, S.unitsOrdered || 0, n(S.orderedProductSales), T.buyBoxPercentage ?? null, T.unitSessionPercentage ?? null]; });
   if (PROBE) return { byDate: byDate.slice(-5), byAsin };
   return { v: 1, src: 'amazon-traffic', at: Math.floor(Date.now() / 1000), byDate, byAsin, from: day(end - sinceDays * 864e5), to: day(end) };
+}
+// ---------- Amazon SP-API: Customer Feedback (review topics & star-rating trend per ASIN) — Brand Analytics role ----------
+async function amazonFeedback(asins) {
+  const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
+  const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com', out = {};
+  for (const a of asins) {
+    const r = {};
+    for (const [k, path] of [['topics', `items/${a}/reviews/topics?marketplaceId=${MARKETPLACE}&sortBy=MENTIONS`], ['trends', `items/${a}/reviews/trends?marketplaceId=${MARKETPLACE}`]]) {
+      try { r[k] = await http(`${base}/customerFeedback/2024-06-01/${path}`, { headers: H }); } catch (e) { r[k + 'Err'] = String(e.message).slice(0, 200); }
+      await sleep(1500);
+    }
+    out[a] = r;
+  }
+  if (PROBE) return out;
+  return { v: 1, src: 'amazon-feedback', at: Math.floor(Date.now() / 1000), items: out };
 }
 // ---------- Amazon Ads API: Sponsored Products daily campaign report (v3) ----------
 async function amazonAds(days) {
@@ -179,6 +196,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
 (async () => {
   const jobs = [];
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-orders', () => amazonOrders(+(E.AMZ_ORDER_DAYS || 45))]);
+  if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-feedback', () => amazonFeedback((E.AMZ_ASINS || 'B0HJQQ3MY4').split(','))]);
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))]);
   if (has('AMZ_SP_CLIENT_ID', 'AMZ_SP_CLIENT_SECRET', 'AMZ_SP_REFRESH_TOKEN')) jobs.push(['amazon-finances', () => amazonFinances(+(E.AMZ_FIN_DAYS || 400))]);
   if (has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
