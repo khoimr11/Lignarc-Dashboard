@@ -92,7 +92,7 @@ export default async function wayfair({ gql, http, tok }) {
   });
 
   // 3a) order status: soCastlegateOrders currently fails server-side (null) — statuses come from manual overrides (wf.statusOv)
-  const status = new Map();
+  const status = new Map(), whIds = new Set();
   // 3b) CastleGate customer orders (both acknowledged and not yet acknowledged)
   await step('orders', async () => {
     const seen = new Map();
@@ -104,6 +104,7 @@ export default async function wayfair({ gql, http, tok }) {
         let newest = from;
         for (const o of L) {
           if (o.poDate && o.poDate > newest) newest = o.poDate;
+          if (o.warehouse && o.warehouse.id) whIds.add(+o.warehouse.id);
           for (const p of o.products || []) {
             const qty = num(p.quantity), key = o.poNumber + '|' + p.partNumber;
             // [po, orderNo, date (US Eastern), status, retailer, state, country, part, sku, name, options, qty, unit wholesale, b2b, sales channel, shipped, warehouse, PO timestamp UTC]
@@ -118,6 +119,24 @@ export default async function wayfair({ gql, http, tok }) {
     return [...seen.values()];
   });
   delete out.statuses;
+
+  // 3c) Wayfair sale event (promotion) behind each PO line: name, type, duration — attributes every sale to its promotion
+  await step('sale', async () => {
+    if (!whIds.size) throw new Error('no warehouse ids');
+    const rows = [];
+    for (const hasResponse of [true, false]) for (let page = 1; page < 60; page++) {
+      const d = await q(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput!, $p: Int!){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:$p, pageSize:50){ pageInfo { hasNextPage } nodes { purchaseOrderNumber supplierCastlegatePurchaseOrderProducts { supplierPartNumber wholesalePrice supplierPurchaseOrderProductSaleEvent { saleEventId type name duration { startDate endDate } } } } } }`,
+        { i: { filter: { hasResponse, warehouseIds: [...whIds], purchaseOrderDateTimeInterval: { startDate: ORDERS_FROM, endDate: new Date(Date.now() + 864e5).toISOString() } } }, p: page });
+      const c = d.castlegatePurchaseOrders;
+      for (const o of c.nodes || []) for (const p of o.supplierCastlegatePurchaseOrderProducts || []) {
+        const e = p.supplierPurchaseOrderProductSaleEvent || {};
+        // [po, part, sale event id, type, name, start, end, wholesale]
+        rows.push([o.purchaseOrderNumber, p.supplierPartNumber, e.saleEventId || null, e.type || '', e.name || '', day(e.duration && e.duration.startDate), day(e.duration && e.duration.endDate), p.wholesalePrice]);
+      }
+      if (!c.pageInfo || !c.pageInfo.hasNextPage) break; await sleep(300);
+    }
+    return rows;
+  });
 
   // 4) Advertising: daily campaign report (V1 reports), CSV parsed by header names
   await step('ads', async () => {

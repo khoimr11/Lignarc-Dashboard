@@ -65,7 +65,9 @@ async function amazonOrders(sinceDays, by = 'CreatedAfter') {
       rows.push([o.AmazonOrderId, (o.PurchaseDate || '').slice(0, 10), o.OrderStatus, i.SellerSKU, i.ASIN, q, q ? Math.round(price / q * 100) / 100 : price, (i.Title || '').slice(0, 90), o.FulfillmentChannel === 'AFN' ? 'afn' : 'mfn',
         Math.round((amt(i.PromotionDiscount) + amt(i.ShippingDiscount)) * 100) / 100, amt(i.ShippingPrice), o.PurchaseDate || '',
         // 12 ship-to state, 13 country, 14 business order — non-PII address fields only (no name, street or phone)
-        (o.ShippingAddress && o.ShippingAddress.StateOrRegion) || '', (o.ShippingAddress && o.ShippingAddress.CountryCode) || 'US', o.IsBusinessOrder ? 'yes' : '']);
+        (o.ShippingAddress && o.ShippingAddress.StateOrRegion) || '', (o.ShippingAddress && o.ShippingAddress.CountryCode) || 'US', o.IsBusinessOrder ? 'yes' : '',
+        // 15 promotion ids applied to the item (coupon 'PLM-…', Buy X Get Y 'Percent Off …', deals) — links each sale to its promotion
+        (i.PromotionIds || []).join('|')]);
     }
   }
   return { v: 1, src: 'amazon-orders', at: Math.floor(Date.now() / 1000), orders: rows };

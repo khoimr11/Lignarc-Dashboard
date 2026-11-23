@@ -16,6 +16,7 @@
         for (const x of p.inb) { if (!x.items || !x.items.length) x.items = (old.get(x.id) && old.get(x.id).items && old.get(x.id).items.length ? old.get(x.id).items : (man[x.id] || man[x.po] || [])); }
         W.inb = p.inb; res.inb = p.inb.length; }
       if (p.orders && p.orders.length) { const before = (W.orders || []).length; W.orders = mergeBy(W.orders, p.orders, r => r[0] + '|' + r[7]).sort((a, b) => (b[2] || '').localeCompare(a[2] || '')); res.orders = W.orders.length; res.newOrders = W.orders.length - before; }
+      if (p.sale && p.sale.length) { W.sale = mergeBy(W.sale, p.sale, r => r[0] + '|' + r[1]); res.sale = W.sale.length; }
       if (p.ads) { W.ads = W.ads || {}; if (p.ads.camps && p.ads.camps.length) W.ads.camps = p.ads.camps; if (p.ads.wallet) W.ads.wallet = p.ads.wallet; if (p.ads.columns) W.ads.columns = p.ads.columns; if (p.ads.sample) W.ads.sample = p.ads.sample;
         W.ads.daily = mergeBy(W.ads.daily, p.ads.daily, r => r[0] + '|' + r[1]).sort((a, b) => a[1].localeCompare(b[1])); res.adsDays = W.ads.daily.length; }
       if (p.adsSku && p.adsSku.daily) { W.adsSku = mergeBy(W.adsSku, p.adsSku.daily, r => r[0] + '|' + r[1]).sort((a, b) => a[0].localeCompare(b[0])); W.adsParts = Object.assign(W.adsParts || {}, p.adsSku.parts || {}); res.adsSku = W.adsSku.length; }
