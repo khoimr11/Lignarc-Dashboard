@@ -203,6 +203,7 @@ async function amazonCatalog(asins) {
 }
 // ---------- Amazon Ads API: Sponsored Products daily campaign report (v3) ----------
 async function amazonAds(days) {
+  if (E.AMZ_ADS_USE_SP_SECRET === '1') E.AMZ_ADS_CLIENT_SECRET = E.AMZ_SP_CLIENT_SECRET;
   const tok = await lwa(E.AMZ_ADS_CLIENT_ID, E.AMZ_ADS_CLIENT_SECRET, E.AMZ_ADS_REFRESH_TOKEN);
   const base = 'https://advertising-api.amazon.com', H = { Authorization: 'Bearer ' + tok, 'Amazon-Advertising-API-ClientId': E.AMZ_ADS_CLIENT_ID };
   const profiles = await http(base + '/v2/profiles', { headers: H });
@@ -270,7 +271,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
   if (SP) jobs.push(['amazon-orders', () => T.daily ? amazonOrders(+(E.AMZ_ORDER_DAYS || 45)) : amazonOrders(3, 'LastUpdatedAfter')]);
   if (SP && T.hourly) jobs.push(['amazon-finances', () => amazonFinances(T.daily ? +(E.AMZ_FIN_DAYS || 400) : 60)]);
   if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)], ['amazon-listings', () => amazonListings(ASINS[0] || 'B0HJQQ3MY4')]);
-  if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET', 'AMZ_ADS_REFRESH_TOKEN')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
+  if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_REFRESH_TOKEN') && (E.AMZ_ADS_CLIENT_SECRET || E.AMZ_ADS_USE_SP_SECRET === '1')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) { E.WF_SKIP = [T.hourly ? '' : 'inb', T.six ? '' : 'ads,adsSku'].filter(Boolean).join(','); jobs.push(['wayfair', wayfair]); }
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }
   const payloads = [], errors = {};
