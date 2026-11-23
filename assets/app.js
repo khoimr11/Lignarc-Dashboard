@@ -953,37 +953,134 @@ function viewAds() {
   ${card('Spend by listing → SKU ' + chOnly('wf'), 'From the Wayfair SKU report; each listing\'s spend is split across its child SKUs by net revenue (equal split if the listing had no sales)', listings.length ? table('lst', [{ k: 'name', l: 'Listing', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.lid)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'alloc', l: 'Allocated to SKUs', nosort: true }], listings, { def: { k: 'spend', d: 'desc' } }) : '<div class="empty">SKU-level ad data arrives with the next daily sync.</div>')}`;
 }
 
+// ================= Incidents & Returns: case verification =================
+// Every case (Wayfair incident/return, Amazon return/A-to-z/SafeT) is checked against the order, the product data,
+// the listings, the photo review and the policy (Wayfair DDA, Wayfair-Managed Returns, Amazon return rules).
+// Each check produces a finding with an owner and an action; the case verdict is the strongest finding.
+const VERDICT = { dispute: ['Dispute — raise a ticket', 'bad', 1], evidence: ['Ask for evidence', 'warn', 2], ours: ['Our fix', 'warn', 3], review: ['Needs review', '', 4], valid: ['Valid', 'good', 5] };
+function amzReturnCases() {
+  const R = (D.amz && D.amz.returns) || [];
+  const cases = R.map(r => ({ ch: 'amz', po: r.order_id, rma: r.amazon_rma_id, part: r.merchant_sku, kind: /a-?to-?z|y/i.test(r.a_to_z_claim || '') && r.a_to_z_claim && r.a_to_z_claim !== 'N' ? 'A-to-z claim' : 'Return', issue: r.return_reason || 'Return', detail: [r.return_reason, r.return_type, r.resolution].filter(Boolean).join(' · '), comment: r.customer_comments || '', photos: 0,
+    delivered: null, requested: (r.return_request_date || '').slice(0, 10), returnDelivered: (r.return_delivery_date || '').slice(0, 10), status: r.return_request_status, inPolicy: r.in_policy, label: r.label_type, labelCost: +r.label_cost || 0, labelPaidBy: r.label_to_be_paid_by, refunded: +r.refunded_amount || 0, orderAmt: +r.order_amount || 0, qty: +r.return_quantity || 1,
+    safet: r.safet_claim_id ? { id: r.safet_claim_id, state: r.safet_claim_state, amt: +r.safet_claim_reimbursement_amount || 0 } : null, deduction: (+r.refunded_amount || 0) + ((/seller/i.test(r.label_to_be_paid_by || '') ? +r.label_cost : 0) || 0), review: { photo: 'none' } }));
+  // refunds posted in Finances with no return request = concessions / A-to-z / refund-at-first-scan
+  const seen = new Set(cases.map(c => c.po));
+  for (const f of (D.amz && D.amz.fin) || []) { if (!/refund/i.test(f[2] || '') || seen.has(f[4])) continue; seen.add(f[4]);
+    cases.push({ ch: 'amz', po: f[4], part: f[5], kind: 'Refund (no return)', issue: 'Refund', detail: f[8] || 'Refund posted in Seller Central', comment: '', photos: 0, requested: String(f[1]).slice(0, 10), refunded: Math.abs(+f[7] || 0), deduction: Math.abs(+f[7] || 0), review: { photo: 'none' } }); }
+  return cases;
+}
+function verifyCase(c, ctx) {
+  const F = [], add = (v, owner, text, action) => F.push({ v, owner, text, action });
+  const P = M.P[c.part] || {}, wl = (D.wfListing || {}).listings || {}, L = wl[P.listing || P.fam] || {}, pol = (D.incidents || {}).policy || {};
+  const line = M.lines.find(l => l.po === c.po && l.part === c.part), paid = line ? line.price * line.qty : null;
+  const lst = (listingModel().cross || []).filter(x => x.part === c.part);
+  const sameSku = ctx.cases.filter(x => x.part === c.part && x.ch === c.ch && /damag/i.test(x.issue));
+  const days = c.delivered && line ? diffDays(line.date, c.delivered) : null;
+  if (c.ch === 'wf') {
+    const dmg = /damag|defect|broken/i.test(c.issue + ' ' + c.detail);
+    if (c.review && c.review.photo === 'mismatch') add('dispute', 'Wayfair', 'Customer photos do not show this product. ' + (c.review.note || ''), `Dispute the ${usd(c.deduction, 2)} deduction: the photos show a different item. CastleGate picks and ships, so either the customer filed against the wrong order or the warehouse shipped another item — neither is a supplier cost.`);
+    if (c.review && c.review.photo === 'listing-conflict') add('ours', 'Us', c.review.note, 'Fix the listing on both channels (images, hardware-finish attribute, description) so the next buyer gets what the page shows.');
+    if (dmg && (c.photos || 0) === 0 && c.deduction > 0) add('evidence', 'Wayfair', `Deducted ${usd(c.deduction, 2)} with no photos on the case.`, 'Ask Wayfair for the damage photos / carrier report before accepting the charge.');
+    if (dmg && pol.dda && c.deduction > 0 && !(c.review && c.review.photo === 'mismatch')) add(sameSku.length >= 3 ? 'review' : 'dispute', 'Wayfair', `Damage charged per incident although the account has a ${pct(pol.dda)} Damage & Defect Allowance. The DDA pays for freight damage and one-off defects reported within ${pol.incidentPeriodDays || 30} days.`, sameSku.length >= 3 ? `${c.part} has ${sameSku.length} damage cases — Wayfair can treat this as a recurring defect or insufficient packaging (outside the DDA). Ask for the reason code; meanwhile upgrade the packaging.` : 'Ask Wayfair for the deduction reason code; dispute unless they cite insufficient packaging or a recurring defect.');
+    if (dmg && /drop|heard|carrier|box|transit|arriv/i.test(c.comment + ' ' + c.detail)) add('review', 'Carrier', 'The customer describes damage in transit (box / drop-off).', 'Freight damage → covered by the DDA; attach the customer\'s note to the dispute.');
+    if (sameSku.length >= 2 && dmg) add('ours', 'Us', `${sameSku.length} damage cases on ${c.part} (${pct(((D.incidents || {}).portal || {}).parts ? (((D.incidents.portal.parts.find(p => p[0] === c.part)) || [])[2] || 0) : 0)} incident rate vs ${pct(((D.incidents || {}).portal || {}).classIncident)} class benchmark).`, /KFFX|UDD2|D9YA|Z9IT|K89O|KBKN/.test(c.part) ? 'Small-parcel vanity with a ceramic/stone top: add corner blocks and a top-board for the sink, and run a drop test before the next PO.' : 'Review carton strength, corner protection and fixing of the countertop for this SKU.');
+    if (paid != null && c.deduction > paid * 1.02) add('dispute', 'Wayfair', `Deduction ${usd(c.deduction, 2)} is higher than the wholesale paid for this order (${usd(paid, 2)}).`, 'Dispute the excess above the wholesale amount.');
+    if (days != null && days > (pol.incidentPeriodDays || 30)) add('review', 'Wayfair', `Reported ${days} days after the order — outside the ${pol.incidentPeriodDays || 30}-day incident period.`, 'Outside the DDA window it is a warranty claim; Wayfair should send a credit request rather than deduct.');
+    if (/mis-?information|not as described|match/i.test(c.issue + ' ' + c.detail) && !(c.review && c.review.photo === 'listing-conflict')) {
+      if ((L.notes || []).length || lst.length) add('ours', 'Us', `The listing has known inconsistencies: ${[...(L.notes || []), ...lst.map(x => `${x.field} Amazon "${x.amz}" vs Wayfair "${x.wf}"`)].join('; ')}.`, 'Correct the listing; the claim is probably valid.');
+      else add('evidence', 'Customer', 'No inconsistency found in the listing data.', 'Ask Wayfair which detail did not match before accepting.');
+    }
+    if (/size|fit|dimension/i.test(c.issue + ' ' + c.detail)) {
+      if ((L.reqMissing || []).some(x => /depth|width|height/i.test(x))) add('ours', 'Us', `"Wrong size" while the Wayfair listing is missing ${L.reqMissing.filter(x => /depth|width|height/i.test(x)).join(', ')} — size filters could not exclude this vanity.`, 'Fill the dimension attributes; the return itself is buyer remorse (handled under Wayfair-Managed Returns).');
+      else add('valid', 'Customer', 'Buyer remorse — the listing dimensions are complete.', 'Nothing to dispute.');
+    }
+    if (c.kind === 'Return' && c.deduction > 0 && paid) { const exp = paid * 0.96 * 0.75; add(Math.abs(c.deduction - exp) / exp < 0.12 || Math.abs(c.deduction - paid * 0.75) / (paid * 0.75) < 0.05 ? 'valid' : 'review', 'Wayfair', `Return credit ${usd(c.deduction, 2)} vs ${usd(exp, 2)} expected under Wayfair-Managed Returns (paid ${usd(paid, 2)} × 96% × 75%).`, 'Matches the program terms unless flagged.'); }
+    if (c.review && c.review.photo === 'pending' && c.photos) add('review', 'Us', c.review.note || `${c.photos} photos not yet reviewed.`, 'Open the case photos in Partner Home and compare them with the SKU images; the weekly check records the result.');
+    if (/^u+$|^\.+$|^x+$/i.test((c.comment || '').trim())) add('evidence', 'Customer', `Meaningless comment ("${c.comment}") and ${c.photos ? c.photos + ' photos' : 'no photos'}.`, c.deduction ? 'Dispute: no usable description of the damage.' : 'Watch: if a deduction follows, dispute it.');
+  } else {
+    // Amazon
+    if (c.kind === 'A-to-z claim') add('review', 'Amazon', 'A-to-z Guarantee claim.', 'Respond in Seller Central › Performance › A-to-z claims within 72 h; claims count against Order Defect Rate.');
+    if (/not as described|inaccurate|different|wrong item/i.test(c.issue + ' ' + c.detail + ' ' + c.comment)) { if (lst.length) add('ours', 'Us', `"Not as described" while specs differ between channels: ${lst.map(x => x.field).join(', ')}.`, 'Align the listing with the spec sheet.'); else add('evidence', 'Customer', '"Not as described" — listing data is consistent.', 'If the item comes back used or different, file a SafeT claim.'); }
+    if (/defect|damag|broken/i.test(c.issue + ' ' + c.detail)) add('review', 'Carrier', 'Damaged / defective on a Multichannel (CastleGate) shipment.', 'Ask the customer for photos; if transit damage, raise it with Wayfair Multichannel (Partner Home ticket) and keep Amazon\'s return label on the seller only if in policy.');
+    if (c.refunded > 0 && !c.returnDelivered && c.requested && diffDays(c.requested, M.today) > 14) add('dispute', 'Amazon', `Refunded ${usd(c.refunded, 2)} but the item has not been returned after ${diffDays(c.requested, M.today)} days.`, 'File a SafeT claim (Seller Central › Orders › SafeT claims) for the refund on an unreturned item.');
+    if (c.orderAmt && c.refunded > c.orderAmt * 1.01) add('dispute', 'Amazon', `Refund ${usd(c.refunded, 2)} exceeds the order amount ${usd(c.orderAmt, 2)}.`, 'Open a case with Selling Partner Support for the excess.');
+    if (/n/i.test(c.inPolicy || '') ) add('dispute', 'Amazon', 'Return outside Amazon\'s return policy.', 'Decline or request reimbursement via SafeT if Amazon authorized it.');
+    if (c.safet) add('review', 'Amazon', `SafeT claim ${c.safet.id} — ${c.safet.state}${c.safet.amt ? ', reimbursed ' + usd(c.safet.amt, 2) : ''}.`, 'Track until closed.');
+    if (/seller/i.test(c.labelPaidBy || '') && c.labelCost) add('review', 'Us', `Return label ${usd(c.labelCost, 2)} paid by us.`, /customer|remorse|no longer|mistake|better price|ordered by/i.test(c.issue) ? 'Buyer-remorse return: the label should be charged to the customer — check the return settings.' : 'Expected for defect / not-as-described returns.');
+    if (c.kind === 'Refund (no return)') add('review', 'Amazon', `Refund of ${usd(c.refunded, 2)} with no return request.`, 'Check whether it was an A-to-z, a concession or a refund-at-first-scan; reimbursement via SafeT may apply.');
+  }
+  if (!F.length) add('valid', c.ch === 'wf' ? 'Customer' : 'Customer', 'No conflict found with the product data, listing or policy.', 'No action.');
+  const top = F.slice().sort((a, b) => VERDICT[a.v][2] - VERDICT[b.v][2])[0];
+  const recover = top.v === 'dispute' || top.v === 'evidence' ? c.deduction || 0 : 0;
+  return { findings: F, verdict: top.v, owner: top.owner, recover, paid, line };
+}
+function ticketText(c, V) {
+  const P = M.P[c.part] || {};
+  const reasons = V.findings.filter(f => f.v === 'dispute' || f.v === 'evidence').map(f => '- ' + f.text).join('\n');
+  return c.ch === 'wf' ? `Subject: Deduction dispute — PO ${c.po} / Part ${c.part} (${usd(c.deduction, 2)})
+
+Hello Wayfair team,
+
+We would like to dispute the ${usd(c.deduction, 2)} deduction on PO ${c.po} (part ${c.part}, ${P.name || ''}${P.listing ? ', listing ' + P.listing : ''}), incident "${c.issue}" delivered ${dLong(c.delivered)}.
+
+${reasons}
+
+This order was fulfilled from CastleGate, and our account has a ${pct(((D.incidents || {}).policy || {}).dda || 0.04)} Damage & Defect Allowance covering freight damage and one-off defects. Please reverse the deduction or share the reason code and the evidence (photos, carrier report) supporting it.
+
+Thank you,
+Lignarc / VHG Living Furniture` : `Subject: Reimbursement request — order ${c.po}${c.rma ? ' / RMA ' + c.rma : ''}
+
+Hello Selling Partner Support,
+
+${reasons}
+
+Please review and reimburse ${usd(V.recover || c.refunded || 0, 2)}.
+
+Thank you,
+Lignarc`;
+}
 function viewQuality() {
-  const I = D.incidents || { cases: [] }, C = SER(), st = D.incidentStats || {};
-  const cases = I.cases.filter(c => passProd(c.part)).map(c => ({ ...c, p: M.P[c.part] || {} }));
-  const shipped = {}; for (const l of M.lines) if (l.ok && l.ch === 'wf' && l.date <= I.asOf) shipped[l.part] = (shipped[l.part] || 0) + l.qty;
+  const I = D.incidents || { cases: [] }, C = SER(), Pt = I.portal || {}, pol = I.policy || {};
+  const all = [...(I.cases || []).map(c => ({ ch: 'wf', ...c })), ...amzReturnCases()].filter(c => (S.platform === 'all' || c.ch === S.platform) && passProd(c.part));
+  const ctx = { cases: all };
+  const cases = all.map(c => { const V = verifyCase(c, ctx); return { ...c, p: M.P[c.part] || {}, V }; });
   const issueColor = k => ({ 'Damaged': C[0], 'Mis-information': C[1], 'Wrong size': C[2] })[k] || C[3];
-  const byIssue = [...groupBy(cases, c => c.issue)].map(([k, cs]) => ({ label: k, v: cs.length, color: issueColor(k), extra: [['SKUs', [...new Set(cs.map(c => c.part))].join(', ')], ['Deducted', usd(sum(cs, c => c.deduction), 2)]] }));
-  const bySku = [...groupBy(cases, c => c.part)].map(([k, cs]) => ({ part: k, n: cs.length, units: shipped[k] || 0, rate: shipped[k] ? cs.length / shipped[k] : null, issues: [...new Set(cs.map(c => c.issue))].join(' · '), ded: sum(cs, c => c.deduction), col: (M.P[k] || {}).col }));
-  const dmg = cases.filter(c => c.issue === 'Damaged').length, ret = cases.filter(c => c.kind === 'Return').length, ded = sum(cases, c => c.deduction);
-  const unitsAll = sum(Object.values(shipped));
-  const tag = c => `<span class="tag issue" style="--c:${issueColor(c.issue)}">${esc(c.issue)}</span>`;
-  const caseCard = c => `<article class="case glass">
-      <header><div class="sku"><span class="dot" style="background:${colColor(c.p.col)}"></span><div><b>${esc(c.part)}</b><small>${esc((c.p.name || '').replace(/ with .*/i, ''))}${c.p.size ? ' · ' + esc(sizeLbl(c.p.size)) : ''}${c.p.color ? ' · ' + esc(c.p.color) : ''}</small></div></div>${tag(c)}</header>
-      <h4>${esc(c.detail)}</h4>
+  const byIssue = [...groupBy(cases, c => c.issue)].map(([k, cs]) => ({ label: k, v: cs.length, color: issueColor(k), extra: [['SKUs', [...new Set(cs.map(c => c.part))].join(', ')], ['Deducted', usd(sum(cs, c => c.deduction || 0), 2)]] }));
+  const ded = sum(cases, c => c.deduction || 0), disp = cases.filter(c => c.V.verdict === 'dispute' || c.V.verdict === 'evidence'), rec = sum(disp, c => c.V.recover);
+  const ours = cases.filter(c => c.V.findings.some(f => f.owner === 'Us' && (f.v === 'ours')));
+  const amzN = cases.filter(c => c.ch === 'amz').length;
+  const vTag = v => `<span class="tag ${VERDICT[v][1]}">${VERDICT[v][0]}</span>`;
+  const chT = ch => `<span class="tag ${ch === 'amz' ? 'tt' : ''}">${ch === 'amz' ? 'Amazon' : 'Wayfair'}</span>`;
+  const ownerC = { Us: 'var(--warn)', Wayfair: 'var(--crit)', Amazon: 'var(--crit)', Carrier: 'var(--s4)', Customer: 'var(--good)' };
+  const caseCard = c => `<article class="case glass v-${c.V.verdict}">
+      <header><div class="sku">${(() => { const m = listingModel(), w = m.wf.find(x => x.part === c.part), a = m.amz.find(x => x.part === c.part); const src = (w && w.img) || (a && a.img); return src ? `<img class="lthumb" loading="lazy" src="${esc(src)}" data-alt="${esc((a && a.img) || '')}" alt="">` : `<span class="dot" style="background:${colColor(c.p.col)}"></span>`; })()}<div><b>${esc(c.part)}</b> ${chT(c.ch)}<small>${esc((c.p.name || '').replace(/ with .*/i, ''))}${c.p.color ? ' · ' + esc(c.p.color) : ''}</small></div></div>${vTag(c.V.verdict)}</header>
+      <h4><span class="tag issue" style="--c:${issueColor(c.issue)}">${esc(c.issue)}</span> ${esc(c.detail)}</h4>
       ${c.comment ? `<blockquote>“${esc(c.comment)}”</blockquote>` : '<p class="sub nocomment">Customer left no comment</p>'}
-      <dl><div><dt>PO</dt><dd>${esc(c.po)}${c.tt ? ' <span class="tag tt">Tried &amp; True</span>' : ''}</dd></div><div><dt>Delivered</dt><dd>${dLong(c.delivered)}${c.state ? ' · ' + esc(c.state) : ''}</dd></div><div><dt>Photos</dt><dd>${c.photos || '—'}</dd></div><div><dt>Deducted</dt><dd class="${c.deduction ? 'neg' : ''}">${c.deduction ? usd(c.deduction, 2) : 'None'}</dd></div></dl>
+      <dl><div><dt>${c.ch === 'amz' ? 'Order' : 'PO'}</dt><dd>${esc(c.po)}${c.tt ? ' <span class="tag tt">Tried &amp; True</span>' : ''}</dd></div><div><dt>${c.ch === 'amz' ? 'Requested' : 'Delivered'}</dt><dd>${dLong(c.delivered || c.requested)}${c.state ? ' · ' + esc(c.state) : ''}</dd></div><div><dt>Photos</dt><dd>${c.photos || '—'}${c.review && c.review.photo && c.review.photo !== 'none' ? ` · <b>${esc({ match: 'match the SKU', mismatch: 'NOT this SKU', pending: 'not reviewed', 'listing-conflict': 'show a listing error' }[c.review.photo] || c.review.photo)}</b>` : ''}</dd></div><div><dt>${c.ch === 'amz' ? 'Refunded' : 'Deducted'}</dt><dd class="${c.deduction ? 'neg' : ''}">${c.deduction ? usd(c.deduction, 2) : 'None'}</dd></div>${c.V.paid != null ? `<div><dt>Wholesale paid</dt><dd>${usd(c.V.paid, 2)}</dd></div>` : ''}</dl>
+      <ul class="findings">${c.V.findings.map(f => `<li class="f-${f.v}"><span class="own" style="--c:${ownerC[f.owner] || 'var(--axis)'}">${esc(f.owner)}</span><div><b>${esc(f.text)}</b><em>${esc(f.action)}</em></div></li>`).join('')}</ul>
+      ${c.V.verdict === 'dispute' || c.V.verdict === 'evidence' ? `<details class="ticket"><summary>Ticket text to send ${c.ch === 'amz' ? 'Amazon' : 'Wayfair'}</summary><textarea readonly rows="12">${esc(ticketText(c, c.V))}</textarea><button type="button" class="btn-copy" data-copy>Copy</button></details>` : ''}
     </article>`;
-  return `${pageHead('Incidents &amp; Returns', `All cases since launch · from ${esc(I.source || 'Partner Home')} · checked ${dLong(I.asOf)} · refreshed every Thursday`)}
-  <div class="alert info"><span class="ic">i</span><div><b>Channel coverage: Wayfair only</b><span>Incident and return cases come from Partner Home. Amazon has had no return or A-to-z claim yet; Amazon refunds appear in Profit › Deductions &amp; refunds as soon as Seller Central posts them.</span></div></div>
-  <div class="grid g-kpi">
-    ${kpi('Cases', n0(cases.length), `${n0(new Set(cases.map(c => c.part)).size)} SKUs affected`)}
-    ${kpi('Damaged on arrival', n0(dmg), `${pct(unitsAll ? dmg / unitsAll : null, 1)} of ${n0(unitsAll)} units shipped`)}
-    ${kpi('Returns', n0(ret), 'Wayfair-managed: refund × 96% × 75% deducted')}
-    ${kpi('Deducted by Wayfair', usd(ded, 2), `Incident rate ${pct(st.incidentRate)} · replacement parts shipped ${pct(st.partsShipped)}`, 'Wayfair\'s own rates from the Incidents and Resolutions dashboard')}
+  const parts = (Pt.parts || []).filter(p => passProd(p[0]) && S.platform !== 'amz').map(p => ({ part: p[0], listing: p[1], rate: p[2], n: p[3], delivered: p[4], brr: p[5], ret: p[6], parcel: p[8], last: p[9], ded: p[10], col: (M.P[p[0]] || {}).col }));
+  return `${pageHead('Incidents &amp; Returns', `Wayfair cases from Partner Home (checked ${dLong(I.asOf)}, weekly) · Amazon returns, A-to-z and refunds via SP-API every hour · every case is checked against the order, product data, listing, photos and policy`)}
+  <div class="grid g-kpi k3">
+    ${kpi('Cases', n0(cases.length), `${n0(cases.filter(c => c.ch === 'wf').length)} Wayfair · ${n0(amzN)} Amazon`)}
+    ${S.platform !== 'amz' ? kpi('Wayfair incident rate', pct(Pt.incidentRate), `class benchmark ${pct(Pt.classIncident)} · buyer-remorse returns ${pct(Pt.brrRate)} vs ${pct(Pt.classBrr)}`, 'Partner Home › Incidents and Resolutions Performance (rolling 6 months, by delivery date).') : kpi('Amazon returns', n0(amzN), 'merchant-fulfilled returns + refunds without return')}
+    ${kpi('Deducted / refunded', usd(ded, 2), `${n0(cases.filter(c => c.deduction > 0).length)} cases with a charge`)}
+    ${kpi('Recoverable — dispute', usd(rec, 2), `${n0(disp.length)} cases: raise a ticket`, 'Cases whose strongest finding is "Dispute" or "Ask for evidence".')}
+    ${kpi('Our fixes', n0(ours.length), 'listing errors, packaging, missing dimensions')}
+    ${S.platform !== 'amz' ? kpi('Replacement parts shipped', pct(Pt.partsShipped), `${n0(Pt.partsRequested || 0)} requested · DDA ${pct(pol.dda)}`, 'Unfulfilled replacement-part requests are charged outside the DDA.') : ''}
   </div>
-  ${dmg ? `<div class="alert crit"><span class="ic">!</span><div><b>${dmg} damage cases${cases.some(c => /sink/i.test(c.detail)) ? ' — including a broken sink top (KFFX)' : ''}</b><span>Replacement parts shipped is ${pct(st.partsShipped)}: when Wayfair asks for a replacement part and none is sent, the full order is refunded and deducted. Turning on replacement parts in Partner Home is the cheapest fix; also check the carton and corner protection for the sink top.</span></div></div>` : ''}
+  ${disp.length ? `<div class="alert crit"><span class="ic">!</span><div><b>${disp.length} case${disp.length > 1 ? 's' : ''} to dispute — ${usd(rec, 2)} recoverable</b><span>${disp.map(c => `${esc(c.part)} ${esc(c.po)} (${usd(c.deduction || 0, 2)}): ${esc(VERDICT[c.V.verdict][0].toLowerCase())}`).join(' · ')}. Each card below has the ticket text ready to copy.</span></div></div>` : ''}
+  ${S.platform !== 'amz' && pol.dda ? `<div class="alert warn"><span class="ic">i</span><div><b>Damage &amp; Defect Allowance ${pct(pol.dda)} is active</b><span>${esc(pol.ddaCovers)}. Excluded: ${esc(pol.ddaExcludes)}. Per-incident damage deductions on top of the allowance need a reason code from Wayfair. <a href="${esc(pol.policyUrl)}" target="_blank" rel="noopener">Wayfair DDA policy</a></span></div></div>` : ''}
+  ${amzN === 0 && S.platform !== 'wf' ? '<div class="alert info"><span class="ic">i</span><div><b>Amazon: no returns or refunds so far</b><span>Returns, A-to-z claims, SafeT claims and refunds sync hourly from the Amazon returns report and Finances; any new case appears here automatically with the same checks.</span></div></div>' : ''}
+  <h2 class="sec-title">Cases and verdicts</h2>
+  <div class="cases">${cases.sort((x, y) => VERDICT[x.V.verdict][2] - VERDICT[y.V.verdict][2] || (y.deduction || 0) - (x.deduction || 0)).map(caseCard).join('') || '<div class="empty">No cases for the current filters</div>'}</div>
   <div class="grid g-2">
-    ${card('By issue ' + chOnly('wf'), 'Number of cases', donut(byIssue, { center: n0(cases.length), sub: 'cases' }))}
-    ${card('By SKU ' + chOnly('wf'), 'Cases ÷ units shipped to date', table('qsku', [{ k: 'part', l: 'SKU', f: (v, r) => `<span class="dot" style="background:${colColor(r.col)};display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span><b>${esc(v)}</b> <span class="sub">${esc(r.col || '')}</span>` }, { k: 'issues', l: 'Issue' }, { k: 'n', l: 'Cases', num: true }, { k: 'units', l: 'Shipped', num: true }, { k: 'rate', l: 'Rate', num: true, f: v => pct(v) }, { k: 'ded', l: 'Deducted', num: true, f: v => v ? usd(v, 2) : '—' }], bySku, { def: { k: 'rate', d: 'desc' } }))}
+    ${card('By issue', 'Number of cases (both channels)', donut(byIssue, { center: n0(cases.length), sub: 'cases' }))}
+    ${card('Who is responsible', 'Owner of the strongest finding per case', hbars(Object.entries(cases.reduce((o, c) => (o[c.V.owner] = (o[c.V.owner] || 0) + 1, o), {})).map(([k, v]) => ({ label: k, v, color: ownerC[k] || C[3], extra: [['Deducted', usd(sum(cases.filter(c => c.V.owner === k), c => c.deduction || 0), 2)]] })), { fmt: n0 }))}
   </div>
-  <h2 class="sec-title">What customers said</h2>
-  <div class="cases">${cases.sort((x, y) => (y.deduction - x.deduction) || y.delivered.localeCompare(x.delivered)).map(caseCard).join('') || '<div class="empty">No cases for the current filters</div>'}</div>`;
+  ${parts.length ? card('By SKU — Partner Home ' + chOnly('wf'), 'Incident rate vs the Vanities class benchmark (' + pct(Pt.classIncident) + '), deliveries in the last 6 months', table('qsku', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'listing', l: 'Listing' }, { k: 'parcel', l: 'Parcel' }, { k: 'delivered', l: 'Delivered', num: true }, { k: 'n', l: 'Incidents', num: true }, { k: 'rate', l: 'Incident rate', num: true, f: v => `<b style="color:${v > (Pt.classIncident || 0.1) ? 'var(--crit-ink)' : 'inherit'}">${pct(v)}</b>` }, { k: 'ret', l: 'Returns', num: true }, { k: 'brr', l: 'Return rate', num: true, f: v => pct(v) }, { k: 'ded', l: 'Deducted', num: true, f: v => v ? usd(v, 2) : '—' }, { k: 'last', l: 'Last delivery', f: v => dLong(v) }], parts, { def: { k: 'rate', d: 'desc' } })) : ''}
+  <p class="note">Checks: photo review (does the photo show this SKU?), photo evidence for charged damage, DDA coverage (freight damage / one-off defects within ${pol.incidentPeriodDays || 30} days), recurring damage on the same SKU, deduction vs wholesale paid, listing conflicts and missing dimensions for "not as described" / "wrong size", Wayfair-Managed Returns credit, Amazon refunds on unreturned items (SafeT), out-of-policy returns, label cost and A-to-z claims. Photos are reviewed weekly (Wayfair's photo viewer is currently returning errors for new cases).</p>`;
 }
 
 function viewInventory() {
@@ -1343,7 +1440,7 @@ function viewPromos() {
 // ================= Listings & Product Management =================
 // Wayfair: Partner Home Product Management (weekly capture → data.wfListing). Amazon: SP-API Listings Items + Product Type
 // Definitions + A+ Content, every 6 hours (data.amz.listings). Each listing is scored on a furniture-category checklist.
-const WF_IMG = (p, s = 300) => p ? `https://assets.wfcdn.com/im/00000000/resize-h${s}-w${s}%5Ecompr-r85/${p}/basic_demo.jpg` : null;
+const WF_IMG = (p, s = 300) => { if (!p) return null; const q = String(p).split('/'), h = q.length === 3 ? q.shift() : '00000000'; return `https://assets.wfcdn.com/im/${h}/resize-h${s}-w${s}%5Ecompr-r85/${q.join('/')}/basic_demo.jpg`; };
 const AMZ_IMG = (u, s = 300) => u ? u.replace(/\._[^/]*_\.jpg$/, '.jpg').replace(/\.jpg$/, `._AC_SL${s}_.jpg`) : null;
 const SMALL_W = new Set(['a', 'an', 'and', 'or', 'with', 'for', 'of', 'the', 'in', 'on', 'to', 'by', 'x']);
 const titleCaseOk = s => !String(s || '').split(/\s+/).some(w => /^[a-z]/.test(w) && !SMALL_W.has(w.toLowerCase()));
@@ -1447,7 +1544,7 @@ function viewListings() {
       imgsW: w ? w.L.imgs : null, imgsA: a ? a.r.imgs.length : null, issues: (a ? a.r.issues.length : 0) + (w ? (w.L.attrWarn || 0) : 0), req: (a ? a.r.missing.length : 0) + (w ? (w.L.reqMissing || []).length : 0) }; });
   const chip = (ok, txt) => `<span class="tag ${ok ? 'good' : ok === false ? 'bad' : ''}">${txt}</span>`;
   const matrix = `<div class="tbl-wrap"><table class="lst"><thead><tr><th></th><th>SKU</th>${showWf ? '<th class="num">Wayfair score</th>' : ''}${showAmz ? '<th class="num">Amazon score</th>' : ''}<th>Channels</th><th class="num">Images</th><th>Video · rich content</th><th class="num">Req. missing</th><th class="num">Issues</th>${showWf ? '<th class="num">Visits 90d</th><th class="num">Conv.</th><th class="num">Wayfair rev. 90d</th>' : ''}<th class="num">Stock</th></tr></thead><tbody>${rows.sort((x, y) => (y.rev90 || 0) - (x.rev90 || 0) || (x.wScore ?? x.aScore ?? 0) - (y.wScore ?? y.aScore ?? 0)).map(r => `<tr>
-    <td>${r.img ? `<img class="lthumb" loading="lazy" src="${esc(r.img)}" alt="">` : '<span class="lthumb ph"></span>'}</td>
+    <td>${r.img ? `<img class="lthumb" loading="lazy" src="${esc(r.img)}" data-alt="${esc(r.a && r.a.img && r.a.img !== r.img ? r.a.img : '')}" alt="">` : '<span class="lthumb ph"></span>'}</td>
     <td>${skuCell(r.part)}</td>${showWf ? `<td class="num">${r.w ? scoreCell(r.wScore) : '<span class="sub">not on Wayfair</span>'}</td>` : ''}${showAmz ? `<td class="num">${r.a ? scoreCell(r.aScore) : '<span class="sub">not on Amazon</span>'}</td>` : ''}
     <td>${r.w ? chip(r.w.live, 'Wayfair ' + (r.w.live ? 'live' : esc(r.w.status))) : ''} ${r.a ? chip(r.a.live, 'Amazon ' + (r.a.live ? 'buyable' : 'not buyable')) : ''}</td>
     <td class="num">${[r.imgsW != null ? 'WF ' + r.imgsW : r.w ? 'WF ?' : '', r.imgsA != null ? 'AMZ ' + r.imgsA : ''].filter(Boolean).join(' · ')}</td>
@@ -1524,12 +1621,14 @@ sb.addEventListener('change', e => {
   else if (el.id === 'incTT') { S.incTT = el.checked; rerender(); }
 });
 sb.addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.ms) S.open[d.dataset.ms] = d.open; }, true);
+$('#view').addEventListener('error', e => { const i = e.target; if (i.tagName === 'IMG' && i.dataset.alt && i.src !== i.dataset.alt) { i.src = i.dataset.alt; i.dataset.alt = ''; } else if (i.tagName === 'IMG' && i.classList.contains('lthumb')) i.style.visibility = 'hidden'; }, true);
 $('#view').addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.ld) S.open['ld' + d.dataset.ld] = d.open; }, true);
 $('#view').addEventListener('click', e => {
   const th = e.target.closest('th[data-sort]');
   if (th) { const id = th.closest('table').dataset.table, k = th.dataset.sort, cur = S.sort[id] || {}; S.sort[id] = { k, d: cur.k === k && cur.d === 'desc' ? 'asc' : 'desc' }; rerender(); return; }
   const g = e.target.closest('[data-gran]'); if (g) { S.gran = g.dataset.gran; rerender(); return; }
   const am = e.target.closest('[data-adm]'); if (am) { S.adm = am.dataset.adm; rerender(); return; }
+  const cp = e.target.closest('[data-copy]'); if (cp) { const t = cp.parentElement.querySelector('textarea'); try { navigator.clipboard.writeText(t.value); cp.textContent = 'Copied'; } catch (er) { t.select(); } return; }
   const go = e.target.closest('[data-goto]'); if (go) { setTab(go.dataset.goto); return; }
   const b = e.target.closest('[data-act]'); if (b) { if (b.dataset.act === 'kpiAll') S.kpiAll = !S.kpiAll; if (b.dataset.act === 'hideZero') S.hideZero = !S.hideZero; rerender(); return; }
   const c = e.target.closest('[data-unchip]'); if (c) { const k = c.dataset.unchip; if (k === 'platform') S.platform = 'all'; else if (k === 'tt') S.incTT = false; else S.f[k].delete(c.dataset.v); rerender(); }
