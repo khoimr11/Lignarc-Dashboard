@@ -395,3 +395,13 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .review blockquote{margin:0;font-size:14px;line-height:1.5}
 .review h4{margin:0;font-size:14px}
 .trunc{display:block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.heat td.hm{text-align:center;font-size:12px;font-variant-numeric:tabular-nums;border-radius:6px;padding:7px 6px;min-width:34px}
+.heat{border-spacing:3px}
+.heat th{font-size:11px;padding:4px}
+.stack100{display:grid;gap:10px;margin-top:10px}
+.stack100 .row{display:grid;grid-template-columns:110px 1fr 56px;gap:10px;align-items:center;font-size:13px}
+.stack100 .tr{display:flex;height:22px;border-radius:7px;overflow:hidden;gap:2px;background:var(--glass-thin)}
+.stack100 i{display:flex;align-items:center;justify-content:center;font-style:normal;font-size:11px;font-weight:650;color:#fff}
+.stack100 b{text-align:right;font-variant-numeric:tabular-nums}
+.insights ul{margin:6px 0 0;padding-left:20px;display:grid;gap:7px;font-size:14px;line-height:1.5}
+.live-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--ink);color:var(--bg,#fff);padding:9px 16px;border-radius:99px;font-size:13px;font-weight:650;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}

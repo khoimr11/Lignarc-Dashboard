@@ -403,6 +403,22 @@ function hbars(items, { fmt = n0, color } = {}) {
   const max = Math.max(1, ...items.map(i => Math.abs(i.v))), C = SER();
   return `<div class="hbar">${items.map((it, i) => `<div class="row" data-tip="${esc(it.tip || tipRows(it.label, [['Value', fmt(it.v)], ...(it.extra || [])]))}"><span>${esc(it.label)}</span><div class="tr"><i style="width:${Math.max(1.5, Math.abs(it.v) / max * 100)}%;background:${it.v < 0 ? cssv('--crit') : (it.color || color || C[0])}"></i></div><b>${esc(fmt(it.v))}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</b></div>`).join('')}</div>`;
 }
+// HTML heatmap: rows × cols, cell shade by value (single-hue ramp), value printed in the cell
+function heatmap(rowKeys, colKeys, cell, { fmt = n0, rowLabel = k => k, colLabel = k => k, tip, color = 1 } = {}) {
+  const vals = rowKeys.flatMap(r => colKeys.map(c => cell(r, c) || 0)), mx = Math.max(0, ...vals);
+  if (!mx) return '<div class="empty">No data in this period</div>';
+  const C = SER(), base = C[color];
+  const td = (r, c) => { const v = cell(r, c) || 0, a = v ? 0.12 + 0.78 * v / mx : 0; return `<td class="hm" style="background:${v ? `color-mix(in srgb, ${base} ${Math.round(a * 100)}%, transparent)` : 'transparent'};color:${a > 0.55 ? '#fff' : 'var(--ink)'}" data-tip="${esc(tip ? tip(r, c, v) : tipRows(rowLabel(r) + ' · ' + colLabel(c), [['Value', fmt(v)]]))}">${v ? fmt(v) : '<span class="sub">·</span>'}</td>`; };
+  return `<div class="tbl-wrap"><table class="heat"><thead><tr><th></th>${colKeys.map(c => `<th class="num">${esc(colLabel(c))}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>${rowKeys.map(r => `<tr><td><b>${esc(rowLabel(r))}</b></td>${colKeys.map(c => td(r, c)).join('')}<td class="num"><b>${fmt(sum(colKeys, c => cell(r, c) || 0))}</b></td></tr>`).join('')}</tbody></table></div>`;
+}
+// 100% stacked horizontal bars: one row per group, segments per category
+function stack100(groups, cats, val, { colorOf, fmt = n0 } = {}) {
+  const C = SER(); if (!groups.length) return '<div class="empty">No data in this period</div>';
+  const col = (c, i) => colorOf ? colorOf(c) : C[i % C.length];
+  return `<div class="legend top">${cats.map((c, i) => `<span><i style="background:${col(c, i)}"></i>${esc(c)}</span>`).join('')}</div><div class="stack100">${groups.map(g => { const tot = sum(cats, c => val(g, c) || 0);
+    return `<div class="row"><span>${esc(g)}</span><div class="tr">${cats.map((c, i) => { const v = val(g, c) || 0; if (!v) return ''; const w = v / tot * 100; return `<i style="width:${w}%;background:${col(c, i)}" data-tip="${esc(tipRows(g + ' · ' + c, [['Value', fmt(v)], ['Share', pct(v / tot, 1)]]))}">${w >= 12 ? pct(v / tot) : ''}</i>`; }).join('')}</div><b>${fmt(tot)}</b></div>`; }).join('')}</div>`;
+}
+
 function ring(frac, label, color) {
   const r = 70, c = 2 * Math.PI * r, f = Math.max(0, Math.min(1, frac || 0));
   return `<svg class="ring" viewBox="0 0 170 170"><circle cx="85" cy="85" r="${r}" fill="none" stroke="var(--grid)" stroke-width="14"/><circle cx="85" cy="85" r="${r}" fill="none" stroke="${color}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${c * f} ${c}" transform="rotate(-90 85 85)"/><text x="85" y="86" text-anchor="middle" style="font:750 34px var(--font);fill:var(--ink);letter-spacing:-1px">${esc(pct(frac))}</text><text x="85" y="108" text-anchor="middle" style="font:12px var(--font);fill:var(--muted)">${esc(label)}</text></svg>`;
@@ -504,7 +520,16 @@ function viewOverview() {
   const gran = autoGran(f, t), bk = buckets(cur.ps, cur.ad, f, t, gran);
   const alerts = buildAlerts(cur);
   const byCol = groupBy(cur.ps, x => x.col), byType = groupBy(cur.ps, x => x.type);
+  // executive summary: the 5 things a BOD member should know about this period
+  const ex = [], chW = S.platform === 'all' ? chanPeriod('wf', f, t).a : null, chA = S.platform === 'all' ? chanPeriod('amz', f, t).a : null;
+  ex.push(`Revenue <b>${usd(a.rev)}</b> (${delta(a.rev, b.rev)}), profit <b>${usd(a.profit)}</b> at ${pct(a.margin, 1)} margin; % Mkt fee ${pct(a.mktPct, 1)}${gMkt != null ? ` vs plan ${pct(gMkt, 1)}` : ''}.`);
+  if (goal) ex.push(`${MON[+ym.slice(5) - 1]} is <b>${mtd.rev >= pace ? 'ahead of' : 'behind'}</b> the revenue plan by ${usd(Math.abs(mtd.rev - pace))}; full-month projection ${usd(proj)} vs target ${usd(goal)} (${pct(goal ? proj / goal : null)}).`);
+  if (chW && chA && chA.units) ex.push(`Wayfair earns <b>${usd(chW.profit)}</b> (${pct(chW.margin, 1)}); Amazon <b style="color:${chA.profit < 0 ? 'var(--crit-ink)' : 'inherit'}">${usd(chA.profit)}</b> (${pct(chA.margin, 1)}) on ${n0(chA.units)} units.`);
+  { const bp = [...groupBy(cur.ps, x => x.part)].map(([k, xs]) => { const g = agg(xs); return [k, g.gp - (cur.ad.byPart[k] || 0), g.units]; }).sort((x, y) => y[1] - x[1]);
+    if (bp.length) { const w = bp[bp.length - 1]; ex.push(`Best SKU <b>${esc(bp[0][0])}</b> (${usd(bp[0][1])} after ads)${w[1] < 0 ? `; weakest <b>${esc(w[0])}</b> loses ${usd(-w[1])}` : ''}.`); } }
+  { const fi = M.pos.map(po => [po, freeInfo(po)]).filter(([, x]) => x && x.left > 0).sort((x, y) => x[1].left - y[1].left)[0]; if (fi) ex.push(`${esc(fi[0].id)}: <b>${fi[1].left} free-storage days</b> left, ${n0(fi[1].remain)} units still in stock.`); }
   return `${pageHead('Overview')}
+  <section class="card glass insights"><div class="card-head"><div><h3>Executive summary</h3><p class="sub">${dLong(f)} – ${dLong(t)}</p></div></div><ul>${ex.map(x => `<li>${x}</li>`).join('')}</ul></section>
   <section class="hero card glass">
     ${ring(goal ? mtd.rev / goal : 0, MON[+ym.slice(5) - 1] + ' target', mtd.rev >= pace ? cssv('--s3') : cssv('--s2'))}
     <div>
@@ -746,7 +771,13 @@ function amzTrafficCard(f, t) {
   const chart = combo3(bk, { bar: { k: 's', name: 'Sessions', axis: n0, color: C[1] }, line: { k: 'pv', name: 'Page views', short: 'Views', axis: n0, color: C[3] }, dash: { k: 'conv', name: 'Conversion (orders ÷ sessions)', fmt: v => pct(v, 1), color: C[4], min: 0.02 },
     tip: x => [['Sessions', n0(x.s), C[1]], ['Page views', n0(x.pv), C[3]], ['Orders', n0(x.oi)], ['Units', n0(x.u)], ['Conversion', x.conv == null ? '—' : pct(x.conv, 1), C[4]], ['Ordered sales', usd(x.sales)]] }, { h: 340 });
   const d = (x, y, o) => b ? delta(x, y, o) + ' ' + vsPrev() : '';
-  return `<div class="grid g-kpi">
+  const RK = ((D.amz && D.amz.rank) || []).filter(r => r[1] === 'B0HJQQ3MY4'), last = RK[RK.length - 1];
+  const rankStrip = last ? `<div class="grid g-kpi k3">
+    ${kpi('Best Seller Rank', last[2] ? '#' + n0(last[2][1]) : '—', last[2] ? esc(last[2][0]) + (last[3] ? ` · #${n0(last[3][1])} in ${esc(last[3][0])}` : '') : '', 'Amazon Catalog API, refreshed every 6 hours. Lower is better.', RK.length > 1 ? { vals: RK.map(r => r[2] ? -r[2][1] : null), color: C[2] } : null)}
+    ${kpi('Featured offer price', last[5] != null ? usd(last[5], 2) : '—', last[8] != null ? `lowest offer ${usd(last[8], 2)}` : '', 'Buy Box (featured offer) landed price from the Pricing API.')}
+    ${kpi('Sellers on the listing', last[9] != null ? n0(last[9]) : '1', last[9] > 1 ? '<b style="color:var(--crit-ink)">Another seller is on your listing — check for hijackers</b>' : 'Only Lignarc (B2C + Business offer)', 'Distinct sellers with a new offer on B0HJQQ3MY4 (Pricing API). More than one = someone else is selling on your listing.')}
+  </div>` : '';
+  return `${rankStrip}<div class="grid g-kpi">
     ${kpi('Sessions', n0(a.s), d(a.s, b && b.s), 'Amazon Sales & Traffic report: unique visits to the listing (browser + app).', { vals: bk.map(x => x.s), color: C[1] })}
     ${kpi('Page views', n0(a.pv), d(a.pv, b && b.pv), '', { vals: bk.map(x => x.pv), color: C[3] })}
     ${kpi('Conversion', pct(a.conv, 1), `${b ? delta(a.conv, b.conv, { pp: true }) + ' ' + vsPrev() + ' · ' : ''}unit session ${pct(a.ucv, 1)}`, 'Order items ÷ sessions (Amazon calls units ÷ sessions "Unit Session Percentage").', { vals: bk.map(x => x.conv), color: C[4], dash: true })}
@@ -787,6 +818,33 @@ function viewCustomers() {
   const share = k => a.rev ? sum(rows.filter(r => r.coast === k), r => r.rev) / a.rev : null;
   const ca = rows.filter(r => r.country === 'CA'), b2b = ps.filter(x => x.b2b);
   if (!US) loadMap();
+  // ---- customer portrait (BA view): who buys what, where, when ----
+  const regionOf = x => x.country === 'CA' ? 'Canada' : ((STATES[x.state] || [])[1] || 'Unknown'), coastOf = x => x.country === 'CA' ? 'Canada' : (((STATES[x.state] || [])[2] || '').replace(' (Gulf)', '') || 'Inland');
+  const orders = [...groupBy(ps, x => x.po)].map(([po, xs]) => ({ po, ch: xs[0].ch, state: xs[0].state, country: xs[0].country, region: regionOf(xs[0]), coast: coastOf(xs[0]), rev: sum(xs, x => x.rev), units: sum(xs, x => x.qty), b2b: xs[0].b2b, hour: xs[0].hour, dow: xs[0].dow }));
+  const nOrd = orders.length, aov = nOrd ? sum(orders, o => o.rev) / nOrd : 0, upo = nOrd ? sum(orders, o => o.units) / nOrd : 0;
+  const regions = [...new Set(ps.map(regionOf))].filter(r => r !== 'Unknown').sort((x, y) => sum(ps.filter(p => regionOf(p) === y), p => p.rev) - sum(ps.filter(p => regionOf(p) === x), p => p.rev));
+  const types = [...new Set(ps.map(x => x.type || 'Other'))], cols = [...new Set(ps.map(x => x.col || 'Other'))], colorOf = x => x.color || 'White & Natural (cart)', colors = [...new Set(ps.map(colorOf))];
+  const sizes = [...new Set(ps.map(x => sizeLbl(x.size)))].sort((a, b) => (parseFloat(a) || 999) - (parseFloat(b) || 999));
+  const R = (fn) => { const m = {}; for (const x of ps) { const k = fn(x); m[k] = (m[k] || 0) + x.qty; } return m; };
+  const by2 = (f1, f2, v = x => x.qty) => { const m = {}; for (const x of ps) { const k = f1(x) + '¦' + f2(x); m[k] = (m[k] || 0) + v(x); } return (a, b) => m[a + '¦' + b] || 0; };
+  const topStates = rows.filter(r => r.country !== 'CA').sort((x, y) => y.rev - x.rev).slice(0, 10).map(r => r.code);
+  const stCol = by2(x => x.state, x => x.col, x => x.rev), regType = by2(regionOf, x => x.type || 'Other'), regSize = by2(regionOf, x => sizeLbl(x.size)), regColor = by2(regionOf, colorOf), regTypeRev = by2(regionOf, x => x.type || 'Other', x => x.rev), regSizeRev = by2(regionOf, x => sizeLbl(x.size), x => x.rev);
+  const hd = by2(x => x.dow, x => x.hour, () => 1);
+  const bands = [[0, 100, '< $100'], [100, 300, '$100–300'], [300, 600, '$300–600'], [600, 1000, '$600–1k'], [1000, 1e9, '$1k+']];
+  const bandRows = bands.map(([lo, hi, l]) => ({ label: l, v: orders.filter(o => o.rev >= lo && o.rev < hi).length, extra: [['Revenue', usd(sum(orders.filter(o => o.rev >= lo && o.rev < hi), o => o.rev))]] }));
+  const chStats = ch => { const os = orders.filter(o => o.ch === ch), xs = ps.filter(x => x.ch === ch); if (!os.length) return null; const topP = [...groupBy(xs, x => x.part)].sort((a, b) => sum(b[1], x => x.qty) - sum(a[1], x => x.qty))[0];
+    const topS = [...groupBy(os, o => o.state)].filter(([k]) => k).sort((a, b) => sum(b[1], o => o.rev) - sum(a[1], o => o.rev))[0];
+    return { orders: os.length, aov: sum(os, o => o.rev) / os.length, upo: sum(os, o => o.units) / os.length, b2b: os.filter(o => o.b2b).length / os.length, topP: topP ? topP[0] : '—', topS: topS ? topS[0] : '—', east: sum(os.filter(o => o.coast === 'East Coast'), o => o.rev) / (sum(os, o => o.rev) || 1) }; };
+  const cW = chStats('wf'), cA = chStats('amz');
+  // auto insights
+  const ins = [];
+  const t5 = rows.filter(r => r.country !== 'CA').sort((x, y) => y.rev - x.rev).slice(0, 5);
+  if (t5.length) ins.push(`<b>${pct(sum(t5, r => r.rev) / (a.rev || 1))}</b> of revenue comes from 5 states (${t5.map(r => r.code).join(', ')}) — ${t5[0].name} alone is ${pct(t5[0].share)}.`);
+  const ec = share('East Coast'), wc = share('West Coast'); if (ec != null) ins.push(`East Coast buyers bring <b>${pct(ec)}</b> of revenue vs <b>${pct(wc)}</b> from the West Coast${ec > 0.4 ? ' — CastleGate Cranbury (NJ) is well placed for them' : ''}.`);
+  for (const rg of regions.slice(0, 3)) { const tp = types.map(t => [t, regTypeRev(rg, t)]).sort((x, y) => y[1] - x[1])[0], sz = sizes.map(z => [z, regSizeRev(rg, z)]).sort((x, y) => y[1] - x[1])[0], tot = sum(types, t => regTypeRev(rg, t)); if (tp && tp[1]) ins.push(`<b>${esc(rg)}</b>: ${esc(tp[0])} brings ${pct(tp[1] / tot)} of the region's revenue; best-selling size by revenue ${esc(sz[0])} (${usd(sz[1])}).`); }
+  const bigShare = sum(orders.filter(o => o.rev >= 600), o => o.rev) / (a.rev || 1); ins.push(`Orders of $600+ are ${pct(orders.filter(o => o.rev >= 600).length / (nOrd || 1))} of orders but <b>${pct(bigShare)}</b> of revenue — double vanities drive the business.`);
+  if (cW && cA) ins.push(`Amazon buyers spend <b>${usd(cA.aov)}</b> per order vs <b>${usd(cW.aov)}</b> on Wayfair; Amazon top state ${esc(cA.topS)}, Wayfair top state ${esc(cW.topS)}.`);
+  const pk = [...groupBy(orders.filter(o => o.dow != null), o => o.dow)].sort((x, y) => y[1].length - x[1].length)[0]; if (pk) ins.push(`Busiest day: <b>${DOW[pk[0]]}</b>${peakH && peakH[0] ? `, busiest hour ${String(peakH[1]).padStart(2, '0')}:00 ET` : ''} — schedule promotions and ad budget around it.`);
   return `${pageHead('Customers')}
   <div class="grid g-kpi k3">
     ${kpi('States reached', n0(Object.keys(usStats).length) + '<small>/ 50</small>', ca.length ? `+ ${ca.length} Canadian provinces` : 'US only')}
@@ -795,6 +853,13 @@ function viewCustomers() {
     ${kpi('West Coast share', pct(share('West Coast')), 'of revenue')}
     ${kpi('Peak order hour', peakH && peakH[0] ? `${String(peakH[1]).padStart(2, '0')}:00<small>ET</small>` : '—', timed.length ? `${n0(peakH[0])} orders in that hour` : 'needs order timestamps')}
     ${kpi('B2B orders', n0(ordersOf(b2b)), `${pct(a.rev ? sum(b2b, x => x.rev) / a.rev : null)} of revenue · Wayfair Professional + Amazon Business`)}
+  </div>
+  <section class="card glass insights"><div class="card-head"><div><h3>Customer insights</h3><p class="sub">Generated from the orders in the selected period and filters</p></div></div><ul>${ins.map(t => `<li>${t}</li>`).join('')}</ul></section>
+  <div class="grid g-kpi">
+    ${kpi('Orders (buyers)', n0(nOrd), `${n0(a.units)} units · ${nf1.format(upo)} units / order`, 'Marketplaces do not share buyer identities, so each order = one buyer.')}
+    ${kpi('Avg. order value', usd(aov), cW && cA ? `Wayfair ${usd(cW.aov)} · Amazon ${usd(cA.aov)}` : '')}
+    ${kpi('Top-5 state share', pct(t5.length ? sum(t5, r => r.rev) / (a.rev || 1) : null), t5.map(r => r.code).join(' · '))}
+    ${kpi('$600+ orders', pct(nOrd ? orders.filter(o => o.rev >= 600).length / nOrd : null), `${pct(bigShare)} of revenue`)}
   </div>
   ${card('Where customers buy', 'Revenue by US state — darker = more revenue · hover a state for units and revenue', usMap(usStats))}
   <div class="grid g-21">
@@ -806,10 +871,21 @@ function viewCustomers() {
       ${card('By region', '', hbars(region, { fmt: usd }))}
     </div>
   </div>
+  <h2 class="sec-title">What customers buy, by region</h2>
   <div class="grid g-2">
-    ${card('Orders by hour of day', 'US Eastern time · Wayfair and Amazon order timestamps', timed.length ? vbars(hours.map((h, i) => ({ label: String(i), v: ordersOf(h), tip: tipRows(`${String(i).padStart(2, '0')}:00–${String(i).padStart(2, '0')}:59 ET`, [['Orders', n0(ordersOf(h))], ['Units', n0(sum(h, x => x.qty))], ['Revenue', usd(sum(h, x => x.rev))]]) })), { fmt: n0, colors: [C[0]], showVals: true }) + '<p class="note">0 = midnight, 12 = noon, 20 = 8 pm Eastern.</p>' : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
-    ${card('Orders by day of week', 'US Eastern time', timed.length ? vbars(dows.map((d, i) => ({ label: DOW[i], v: ordersOf(d), tip: tipRows(DOW[i], [['Orders', n0(ordersOf(d))], ['Units', n0(sum(d, x => x.qty))], ['Revenue', usd(sum(d, x => x.rev))]]) })), { fmt: n0, colors: [C[2]] }) : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
+    ${card('Product type by region', 'Units · share of each region', stack100(regions, types, (g, c) => regType(g, c)))}
+    ${card('Size by region', 'Units', heatmap(regions, sizes, (r, c) => regSize(r, c), { color: 0 }))}
   </div>
+  <div class="grid g-2">
+    ${card('Collection by top state', 'Revenue · top 10 states', heatmap(topStates, cols, (r, c) => stCol(r, c), { fmt: usdK, rowLabel: k => k + ' · ' + ((STATES[k] || [])[0] || ''), color: 2 }))}
+    ${card('Color by region', 'Units', heatmap(regions, colors, (r, c) => regColor(r, c), { color: 3 }))}
+  </div>
+  <div class="grid g-2">
+    ${card('Order value bands', 'Number of orders by order value', hbars(bandRows, { fmt: n0 }))}
+    ${cW || cA ? card('Wayfair vs Amazon buyers', '', `<div class="tbl-wrap"><table class="pnl-tbl"><thead><tr><th></th><th class="num">Wayfair</th><th class="num">Amazon</th></tr></thead><tbody>
+      ${[['Orders', o => n0(o.orders)], ['Avg. order value', o => usd(o.aov)], ['Units / order', o => nf1.format(o.upo)], ['Top state', o => esc(o.topS)], ['Top SKU', o => esc(o.topP)], ['East Coast share', o => pct(o.east)], ['B2B share', o => pct(o.b2b)]].map(([l, f]) => `<tr><td>${l}</td><td class="num">${cW ? f(cW) : '—'}</td><td class="num">${cA ? f(cA) : '—'}</td></tr>`).join('')}</tbody></table></div>`) : ''}
+  </div>
+  ${card('When customers order', 'Orders by day and hour · US Eastern time', heatmap([0, 1, 2, 3, 4, 5, 6].filter(d => orders.some(o => o.dow === d)), Array.from({ length: 24 }, (_, h) => h).filter(h => h % 1 === 0), (d, h) => hd(d, h), { rowLabel: d => DOW[d], colLabel: h => String(h), color: 4 }))}
   ${reviewsSection()}
   </div>`;
 }
@@ -1029,22 +1105,33 @@ $('#themeBtn').onclick = () => { const cur = document.documentElement.dataset.th
 $('#logoutBtn').onclick = () => { store.del('lg-dk'); location.hash = ''; location.reload(); };
 const th0 = store.get('lg-theme'); if (th0) document.documentElement.dataset.theme = th0;
 
-function start(data, updated) {
-  D = data; D.wf = D.wf || {}; D.meta = D.meta || {}; build();
-  const u = new Date(updated || (D.meta.at * 1000) || Date.now());
-  $('#updated').textContent = 'Updated ' + u.toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short', timeZone: 'Asia/Ho_Chi_Minh' }) + ' GMT+7';
+let LIVE = null;
+const stamp = updated => { const u = new Date(updated || (D.meta.at * 1000) || Date.now()); $('#updated').textContent = 'Updated ' + u.toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short', timeZone: 'Asia/Ho_Chi_Minh' }) + ' GMT+7 · live'; };
+function start(data, updated, raw) {
+  D = data; D.wf = D.wf || {}; D.meta = D.meta || {}; build(); stamp(updated);
   $('#login').hidden = true; $('#app').hidden = false;
   const h = location.hash.slice(1); setTab(VIEWS[h] ? h : 'overview');
+  LIVE = { raw, updated };
 }
+// Live mode: the data file changes whenever the 15-minute API sync finds something new — poll it (no login, no cost) and redraw in place
+async function livePoll() {
+  if (!LIVE || !LIVE.raw || document.hidden) return;
+  try {
+    const f = await fetchFile(); if (!f.updated || f.updated === LIVE.updated) return;
+    const data = await openWith(f, LIVE.raw), y = scrollY; D = data; D.wf = D.wf || {}; D.meta = D.meta || {}; build(); LIVE.updated = f.updated; stamp(f.updated); render(); scrollTo(0, y);
+    const t = document.createElement('div'); t.className = 'live-toast'; t.textContent = 'New data loaded'; document.body.appendChild(t); setTimeout(() => t.remove(), 3500);
+  } catch (e) {}
+}
+setInterval(livePoll, 120000); document.addEventListener('visibilitychange', () => { if (!document.hidden) livePoll(); });
 $('#loginForm').addEventListener('submit', async e => {
   e.preventDefault(); const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Decrypting…'; $('#loginErr').textContent = '';
-  try { const { raw, data, updated } = await login($('#user').value, $('#pass').value); store.set('lg-dk', b64e(raw), $('#remember').checked); $('#pass').value = ''; start(data, updated); }
+  try { const { raw, data, updated } = await login($('#user').value, $('#pass').value); store.set('lg-dk', b64e(raw), $('#remember').checked); $('#pass').value = ''; start(data, updated, raw); }
   catch (x) { $('#loginErr').textContent = x.message === 'bad' ? 'Wrong username or password' : x.message; }
   btn.disabled = false; btn.textContent = 'Sign in';
 });
 (async () => {
   const k = store.get('lg-dk');
-  if (k) { try { const f = await fetchFile(); start(await openWith(f, b64d(k)), f.updated); return; } catch (e) { store.del('lg-dk'); } }
+  if (k) { try { const f = await fetchFile(); start(await openWith(f, b64d(k)), f.updated, b64d(k)); return; } catch (e) { store.del('lg-dk'); } }
   $('#login').hidden = false; setTimeout(() => $('#user').focus(), 50);
 })();
 })();

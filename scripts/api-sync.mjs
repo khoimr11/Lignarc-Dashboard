@@ -151,7 +151,7 @@ async function amazonCatalog(asins) {
       const o = await http(`${base}/products/pricing/v0/items/${a}/offers?MarketplaceId=${MARKETPLACE}&ItemCondition=New`, { headers: H });
       const P = o.payload || {}, sm = P.Summary || {}, offers = P.Offers || [];
       const bb = (sm.BuyBoxPrices || [])[0], mine = offers.find(x => x.MyOffer);
-      r.offers = sm.TotalOfferCount ?? offers.length; r.bbPrice = bb ? +(bb.LandedPrice || bb.ListingPrice || {}).Amount : null;
+      r.offers = sm.TotalOfferCount ?? offers.length; r.sellers = new Set(offers.map(x => x.SellerId).filter(Boolean)).size || null; r.bbPrice = bb ? +(bb.LandedPrice || bb.ListingPrice || {}).Amount : null;
       r.myPrice = mine ? +(mine.ListingPrice || {}).Amount : null; r.myBB = mine ? !!mine.IsBuyBoxWinner : null; r.lowest = ((sm.LowestPrices || [])[0] || {}).LandedPrice ? +sm.LowestPrices[0].LandedPrice.Amount : null;
     } catch (e) { err[a + ':pricing'] = e.message.slice(0, 200); }
     rows.push(r); await sleep(2200);
