@@ -405,3 +405,17 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .stack100 b{text-align:right;font-variant-numeric:tabular-nums}
 .insights ul{margin:6px 0 0;padding-left:20px;display:grid;gap:7px;font-size:14px;line-height:1.5}
 .live-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--ink);color:var(--bg,#fff);padding:9px 16px;border-radius:99px;font-size:13px;font-weight:650;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+
+/* Deals & Promotions */
+.tag.good{background:rgba(12,163,12,.12);border-color:rgba(12,163,12,.35);color:var(--good-ink)}
+.tag.warn{background:rgba(250,178,25,.16);border-color:rgba(217,154,0,.45);color:var(--ink)}
+.gantt-wrap{overflow-x:auto}.gantt .g-lbl{font-size:12px;fill:var(--ink)}.gantt .g-today{font-size:11px;fill:var(--crit-ink);font-weight:650}
+.g-axis{font-size:11px;fill:var(--muted)}
+.plan{display:grid;gap:10px}
+.plan-row{display:grid;grid-template-columns:170px minmax(0,1fr) 210px;gap:16px;padding:14px 16px;border-radius:var(--r-md);background:var(--glass-thin);border:1px solid var(--stroke);border-left:4px solid var(--axis)}
+.plan-row.p1{border-left-color:var(--crit)}.plan-row.p2{border-left-color:var(--warn)}
+.plan-when{display:flex;flex-direction:column;gap:6px;align-items:flex-start}.plan-when small{color:var(--ink2);font-size:12px;line-height:1.4}
+.plan-body b{font-size:14.5px}.plan-body p{margin:6px 0 0;font-size:13px;line-height:1.5;color:var(--ink2)}
+.plan-skus{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.plan-skus span{font:600 11px var(--mono);padding:2px 7px;border-radius:7px;background:var(--glass-strong);border:1px solid var(--stroke)}
+.plan-num{display:flex;flex-direction:column;gap:2px;text-align:right}.plan-num small{color:var(--muted);font-size:11px;margin-top:4px}.plan-num b{font-size:13px}
+@media (max-width:860px){.plan-row{grid-template-columns:1fr}.plan-num{text-align:left}}

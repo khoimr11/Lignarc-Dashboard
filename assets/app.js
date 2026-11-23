@@ -128,7 +128,7 @@ function build() {
   for (const r of (D.amz && D.amz.orders) || []) {
     const qty = +r[5] || 0, price = +r[6] || 0, fo = finBy[r[0]], ts = r[11] || null, hd = ts ? etHourDow(ts) : null;
     lines.push({ ch: 'amz', po: r[0], date: ts ? vnDay(ts) : r[1], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: String(r[12] || '').toUpperCase(), country: r[13] || 'US', part: r[3], qty, price, base: price, b2b: r[14] === 'yes', tt: false,
-      ship: fo ? fo.ship : (+r[10] || 0), promoAmt: fo ? fo.promo : (+r[9] || 0), fin: fo || null });
+      ship: fo ? fo.ship : (+r[10] || 0), promoAmt: fo ? fo.promo : (+r[9] || 0), promoIds: String(r[15] || ''), fin: fo || null });
   }
   lines.sort((a, b) => (a.ts || a.date + 'T12').localeCompare(b.ts || b.date + 'T12'));
   // split each order line into FIFO pieces (Tried & True units ship from the same stock, so they consume layers too)
@@ -1058,7 +1058,288 @@ function renderSidebar() {
 }
 
 // ---------------- render & wiring ----------------
-const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, ads: viewAds, quality: viewQuality, inventory: viewInventory };
+// ================= Deals & Promotions =================
+/* Deals & Promotions tab.
+ * Sources: Amazon order items (PromotionIds per sale, SP-API), Wayfair order lines (wholesale paid vs base cost = funded discount)
+ * + Wayfair sale event per PO line (supplier-order API, when available), and the promotion list captured weekly from
+ * Seller Central › Manage Promotions and Partner Home › Promotions (data.promos). Every sale is attributed to one promotion:
+ * Amazon by promotion ID, Wayfair by sale event (API) or else by the shortest event window that covers the order date. */
+const PR_BANDS = [[0, 0.005, 'Full price'], [0.005, 0.15, '1–15%'], [0.15, 0.25, '15–25%'], [0.25, 0.35, '25–35%'], [0.35, 0.45, '35–45%'], [0.45, 1.01, '45%+']];
+const PR_STATE = { live: ['Live', 'good'], upcoming: ['Upcoming', 'tt'], open: ['Open for submission', 'warn'], ended: ['Ended', ''] };
+const chName = c => c === 'amz' ? 'Amazon' : c === 'wf' ? 'Wayfair' : 'All channels';
+
+function promoModel() {
+  if (promoModel.c && promoModel.c.M === M) return promoModel.c;
+  const PD = D.promos || { items: [], calendar: [] }, today = M.today;
+  const items = (PD.items || []).map(p => ({ ...p, optOut: /opt out/i.test(p.name), state: p.end < today ? 'ended' : p.start > today ? (/open/i.test(p.status || '') ? 'open' : 'upcoming') : 'live' }));
+  const cal = (PD.calendar || []).map(c => ({ ...c, state: c.end < today ? 'ended' : c.start > today ? 'upcoming' : 'live' }));
+  const saleBy = new Map((((D.wf && D.wf.sale) || []).filter(r => r[4])).map(r => [r[0] + '|' + r[1], r]));
+  const byName = new Map(items.map(p => [p.name.toLowerCase(), p]));
+  const wfEv = items.filter(p => p.ch === 'wf' && !p.optOut);
+  const cover = d => wfEv.filter(p => d >= p.start && d <= p.end).sort((a, b) => diffDays(a.start, a.end) - diffDays(b.start, b.end));
+  const contrib = x => x.net - x.dda - x.cg - x.amzFee - (x.mcf || 0) - x.cogs;
+  // one row per order line (FIFO pieces added back together)
+  const sales = [];
+  for (const [, ps] of groupBy(M.pieces.filter(x => x.ok && !x.tt), x => x.ch + '|' + x.po + '|' + x.part)) {
+    const l = ps[0], qty = sum(ps, x => x.qty), rev = sum(ps, x => x.rev), net = sum(ps, x => x.net), promo = sum(ps, x => x.promo);
+    let pid = null, how = 'no promotion';
+    if (l.ch === 'amz') {
+      const ids = String(l.promoIds || '').split('|').filter(Boolean), hit = items.find(p => p.ch === 'amz' && p.match && ids.some(id => id.startsWith(p.match)));
+      if (hit) { pid = hit.id; how = 'promotion ID on the Amazon order'; } else if (promo > 0.005) how = 'discount, promotion not identified';
+    } else {
+      const s = saleBy.get(l.po + '|' + l.part), named = s && byName.get(String(s[4]).toLowerCase());
+      if (named) { pid = named.id; how = 'Wayfair sale event on the PO'; }
+      else if (promo > 0.005) { const c = cover(l.date)[0]; if (c) { pid = c.id; how = 'event running on the order date'; } else how = 'discount outside any listed event'; }
+    }
+    sales.push({ ch: l.ch, po: l.po, part: l.part, date: l.date, dow: l.dow, qty, rev, net, promo, depth: rev ? promo / rev : 0, contrib: sum(ps, contrib), pid, how, ev: (saleBy.get(l.po + '|' + l.part) || [])[4] || '' });
+  }
+  // effective selling days of each promotion = days on which it was the promotion that sales were attributed to
+  const effDays = p => { if (p.start > today) return 0; let n = 0; const end = p.end < today ? p.end : today;
+    for (let d = p.start; d <= end; d = addDays(d, 1)) { if (p.ch === 'amz' || (cover(d)[0] || {}).id === p.id) n++; } return n; };
+  const chFirst = ch => (sales.filter(s => s.ch === ch).map(s => s.date).sort()[0]) || today;
+  const chAvg = {}; for (const ch of ['wf', 'amz']) { const n = diffDays(chFirst(ch), today) + 1; chAvg[ch] = n > 0 ? sum(sales.filter(s => s.ch === ch), s => s.qty) / n : 0; }
+  for (const p of items) {
+    const ss = sales.filter(s => s.pid === p.id), days = effDays(p), units = sum(ss, s => s.qty), rev = sum(ss, s => s.rev), promo = sum(ss, s => s.promo);
+    p.s = { orders: new Set(ss.map(s => s.po)).size, units, rev, net: sum(ss, s => s.net), promo, contrib: sum(ss, s => s.contrib), depth: rev ? promo / rev : null, days, upd: days ? units / days : null, lift: days && chAvg[p.ch] ? (units / days) / chAvg[p.ch] - 1 : null, skus: [...new Set(ss.map(s => s.part))] };
+  }
+  // unit economics at any discount depth (next unit's FIFO landed cost)
+  const nextCost = part => { const L = M.layers[part] || []; const ly = L.find(x => x.left > 0) || L[L.length - 1]; return ly ? ly.cogs : 0; };
+  const amzPrice = part => { const r = sales.filter(s => s.ch === 'amz' && s.part === part && s.qty).sort((a, b) => b.date.localeCompare(a.date))[0]; return r ? r.rev / r.qty : 0; };
+  const econ = (ch, part) => {
+    const P = M.P[part] || {}, c = nextCost(part);
+    if (ch === 'wf') { const b = P.base || 0; if (!b) return null; const f = M.cgFee(part), k = b * (1 - M.A.dda);
+      return { ch, part, list: b, retail: P.retail || b * 2, cost: c, fee: f, be: 1 - (f + c) / k, safe: 1 - (f + c + 0.10 * b) / k, at: d => b * (1 - d) * (1 - M.A.dda) - f - c }; }
+    const pr = amzPrice(part); if (!pr) return null; const r = M.A.amzFeeRate || 0.055, mcf = M.A.amzMcf || 0, k = pr * (1 - r);
+    return { ch, part, list: pr, retail: pr, cost: c, fee: mcf, be: 1 - (mcf + c) / k, safe: 1 - (mcf + c + 0.10 * pr) / k, at: d => pr * (1 - d) * (1 - r) - mcf - c };
+  };
+  // stock, pace and free-storage clock per SKU (stock is shared by both channels)
+  const inv = {}; for (const r of (D.wf && D.wf.inv) || []) inv[r[0]] = { onHand: +r[2] || 0, avail: +r[3] || 0 };
+  const v30 = {}; for (const s of sales) if (s.date > addDays(today, -30)) v30[s.part] = (v30[s.part] || 0) + s.qty;
+  const freeLeft = part => { const ly = (M.layers[part] || []).find(x => x.left > 0); if (!ly) return null; const po = M.pos.find(p => p.id === ly.po); const fi = po && freeInfo(po); return fi ? { po: po.id, left: fi.left, end: fi.end } : null; };
+  const out = { M, items, cal, sales, chAvg, econ, inv, v30, freeLeft, today, at: PD.at, src: PD.src };
+  promoModel.c = out; return out;
+}
+
+// ---------- charts ----------
+function promoGantt(m) {
+  const today = m.today, w = Math.max(CW('full'), 760), LW = Math.min(250, w * 0.3), R = 12, T = 34, RH = 26;
+  const rows = [];
+  const push = (label, sub, list, kind) => rows.push({ label, sub, list, kind });
+  const amz = m.items.filter(p => p.ch === 'amz'), wf = m.items.filter(p => p.ch === 'wf').sort((a, b) => a.start.localeCompare(b.start) || b.end.localeCompare(a.end));
+  if (S.platform !== 'wf') { for (const p of amz) push(p.name, p.type + ' · ' + (p.terms || ''), [p], 'promo'); }
+  if (S.platform !== 'amz') for (const p of wf) push(p.name.replace(/^\[Opt Out\] /, '(opted out) '), p.type, [p], 'promo');
+  for (const c of m.cal.filter(c => S.platform === 'all' || c.ch === 'all' || c.ch === S.platform)) push(c.name, chName(c.ch) + (c.confirmed ? ' · confirmed' : ' · expected'), [c], 'cal');
+  if (!rows.length) return '<div class="empty">No promotions on file</div>';
+  const starts = rows.flatMap(r => r.list.map(p => p.start)).sort();
+  const x0 = [starts[0], addDays(today, -125)].sort().pop(), x1 = addDays(today, 95), span = diffDays(x0, x1);
+  for (let i = rows.length - 1; i >= 0; i--) { const p = rows[i].list[0]; if (p.start > x1 || p.end < x0) rows.splice(i, 1); }
+  const X = d => LW + (Math.max(0, Math.min(span, diffDays(x0, d))) / span) * (w - LW - R);
+  const h = T + rows.length * RH + 8, C = SER();
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img" class="gantt"><defs><pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="color-mix(in srgb, ${C[3]} 18%, transparent)"/><line x1="0" y1="0" x2="0" y2="6" stroke="${C[3]}" stroke-width="2" stroke-opacity=".55"/></pattern></defs><g class="grid">`;
+  for (let d = x0.slice(0, 8) + '01'; d <= x1; d = addDays(d.slice(0, 8) + '28', 4).slice(0, 8) + '01') { if (d < x0) continue; const x = X(d); s += `<line x1="${x}" x2="${x}" y1="${T - 8}" y2="${h - 4}"/><text x="${x + 4}" y="${T - 14}">${esc(new Date(d + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' }))}</text>`; }
+  s += `</g>`;
+  rows.forEach((r, i) => {
+    const y = T + i * RH, p = r.list[0], cy = y + RH / 2;
+    if (i % 2 === 0) s += `<rect x="0" y="${y}" width="${w}" height="${RH}" fill="var(--glass-thin)"/>`;
+    s += `<text x="8" y="${cy + 4}" class="g-lbl">${esc(r.label.length > 38 ? r.label.slice(0, 37) + '…' : r.label)}</text>`;
+    const xa = X(p.start), xb = Math.max(X(addDays(p.end, 1)), xa + 3), st = r.kind === 'cal' ? 'cal' : p.state;
+    const fill = st === 'cal' ? 'url(#hatch)' : st === 'live' ? C[0] : st === 'ended' ? 'var(--axis)' : st === 'open' ? 'transparent' : C[1];
+    const ps = p.s || {};
+    const tipR = r.kind === 'cal' ? [['Channel', chName(p.ch)], ['Dates', dLong(p.start) + ' – ' + dLong(p.end)], ['Status', p.confirmed ? 'Confirmed' : 'Expected — date not announced yet'], ...(p.note ? [['Note', p.note]] : [])]
+      : [['Channel', chName(p.ch)], ['Type', p.type], ['Dates', dLong(p.start) + ' – ' + dLong(p.end)], ['Status', (PR_STATE[p.state] || [p.status])[0]], ...(p.terms ? [['Terms', p.terms]] : []), ...(p.skuCount ? [['SKUs submitted', String(p.skuCount)]] : []), ...(p.recommended ? [['SKUs recommended by Wayfair', String(p.recommended)]] : []), ...(p.deadline ? [['Submission deadline', dLong(p.deadline)]] : []),
+        ['Orders · units', `${n0(ps.orders || 0)} · ${n0(ps.units || 0)}`], ['Revenue', usd(ps.rev || 0)], ['Avg discount', pct(ps.depth, 1)], ['Contribution', usd(ps.contrib || 0)]];
+    s += `<g data-tip="${esc(tipRows(p.name, tipR))}"><rect class="hit" x="${LW}" y="${y}" width="${w - LW}" height="${RH}"/><rect x="${xa}" y="${y + 6}" width="${xb - xa}" height="${RH - 12}" rx="5" fill="${fill}" ${st === 'open' ? `stroke="${C[1]}" stroke-width="1.6" stroke-dasharray="4 3"` : ''} ${st === 'ended' ? 'fill-opacity=".7"' : ''}/>`;
+    if (p.deadline && p.deadline >= x0) { const xd = X(p.deadline); s += `<path d="M${xd},${cy - 6}l5,6l-5,6l-5,-6z" fill="${p.deadline < today ? 'var(--axis)' : 'var(--crit)'}"/>`; }
+    for (const o of m.sales.filter(o => o.pid === p.id && o.date >= x0)) s += `<circle cx="${X(o.date) + 2}" cy="${cy}" r="${Math.min(7, 2.5 + o.qty)}" fill="var(--ink)" fill-opacity=".72" stroke="var(--glass-strong)" stroke-width="1.5"/>`;
+    s += `</g>`;
+  });
+  const xt = X(today); s += `<line x1="${xt}" x2="${xt}" y1="${T - 8}" y2="${h - 4}" stroke="var(--crit)" stroke-width="1.5"/><text x="${xt + 4}" y="${h - 6}" class="g-today">Today</text></svg>`;
+  const lg = [['Live', C[0]], ['Upcoming / submitted', C[1]], ['Ended', 'var(--axis)']];
+  return `<div class="chart gantt-wrap">${s}</div><div class="legend">${lg.map(([l, c]) => `<span><i style="background:${c}"></i>${l}</span>`).join('')}<span><i style="background:transparent;border:1.5px dashed ${C[1]}"></i>Open for submission</span><span><i style="background:url(#hatch);background:color-mix(in srgb, ${C[3]} 30%, transparent)"></i>Retail calendar</span><span><i style="background:var(--crit);transform:rotate(45deg);border-radius:1px"></i>Submission deadline</span><span><i style="background:var(--ink);border-radius:50%"></i>Order (size = units)</span></div>`;
+}
+
+function promoDaily(m, f, t) {
+  const w = CW('full'), h = 260, L = 40, R = 10, T = 14, B = 28, C = SER(), days = daysOf(f, t);
+  const ss = m.sales.filter(s => s.date >= f && s.date <= t && (S.platform === 'all' || s.ch === S.platform) && passProd(s.part));
+  const by = groupBy(ss, s => s.date), wfU = d => sum((by.get(d) || []).filter(s => s.ch === 'wf'), s => s.qty), amU = d => sum((by.get(d) || []).filter(s => s.ch === 'amz'), s => s.qty);
+  const mx = nice(Math.max(1, ...days.map(d => wfU(d) + amU(d))), 3), cw = w - L - R, ch = h - T - B, band = cw / days.length, bw = Math.max(2, Math.min(18, band * 0.7));
+  const y = v => T + ch - v / mx.max * ch, X = d => L + diffDays(f, d) * band;
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let v = 0; v <= mx.max + 1e-9; v += mx.step) s += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  s += `</g>`;
+  // shaded windows: short events (≤ 7 days) and confirmed retail events
+  const wins = [...m.items.filter(p => !p.optOut && diffDays(p.start, p.end) <= 6 && (S.platform === 'all' || p.ch === S.platform)), ...m.cal.filter(c => c.confirmed && (S.platform === 'all' || c.ch === 'all' || c.ch === S.platform))];
+  for (const p of wins) { if (p.end < f || p.start > t) continue; const a = X(p.start < f ? f : p.start), b = X(addDays(p.end > t ? t : p.end, 1));
+    s += `<g data-tip="${esc(tipRows(p.name, [['Dates', dLong(p.start) + ' – ' + dLong(p.end)], ['Channel', chName(p.ch)]]))}"><rect x="${a}" y="${T}" width="${b - a}" height="${ch}" fill="color-mix(in srgb, ${C[1]} 14%, transparent)"/></g>`; }
+  days.forEach(d => { const a = wfU(d), b = amU(d), x = X(d) + (band - bw) / 2, lst = by.get(d) || [];
+    if (!a && !b) return;
+    s += `<g data-tip="${esc(tipRows(dLong(d), [['Wayfair units', n0(a), C[0]], ['Amazon units', n0(b), C[2]], ['Avg discount', pct(sum(lst, s => s.promo) / (sum(lst, s => s.rev) || 1), 1)], ['Promotions', [...new Set(lst.map(s => (m.items.find(p => p.id === s.pid) || {}).name).filter(Boolean))].join(', ') || '—']]))}"><rect class="hit" x="${X(d)}" y="${T}" width="${band}" height="${ch}"/>`;
+    if (a) s += `<path d="${rr(x, y(a), bw, y(0) - y(a), 3)}" fill="${C[0]}"/>`;
+    if (b) s += `<path d="${rr(x, y(a + b), bw, y(a) - y(a + b) - (a ? 2 : 0), 3)}" fill="${C[2]}"/>`;
+    s += `</g>`; });
+  const step = Math.ceil(days.length / Math.max(2, Math.floor(cw / 70)));
+  days.forEach((d, i) => { if (i % step === 0) s += `<text x="${X(d) + band / 2}" y="${h - 8}" text-anchor="middle" class="g-axis">${esc(dShort(d))}</text>`; });
+  s += `<line class="axis" x1="${L}" x2="${w - R}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
+  return `<div class="chart">${s}</div><div class="legend"><span><i style="background:${C[0]}"></i>Wayfair units</span><span><i style="background:${C[2]}"></i>Amazon units</span><span><i style="background:color-mix(in srgb, ${C[1]} 30%, transparent)"></i>Short event / Black Friday window</span></div>`;
+}
+
+function promoScatter(m, ss) {
+  if (!ss.length) return '<div class="empty">No sales</div>';
+  const w = CW('half'), h = 300, L = 56, R = 12, T = 14, B = 34, C = SER();
+  const ys = ss.map(s => s.qty ? s.contrib / s.qty : 0), lo = Math.min(0, ...ys), hi = Math.max(0, ...ys), pad = (hi - lo) * 0.1 || 10;
+  const xmax = Math.max(0.5, Math.ceil(Math.max(...ss.map(s => s.depth)) * 10 + 0.5) / 10), y0 = lo - pad, y1 = hi + pad;
+  const X = d => L + d / xmax * (w - L - R), Y = v => T + (y1 - v) / (y1 - y0) * (h - T - B);
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  for (let d = 0; d <= xmax + 1e-9; d += 0.1) s += `<line x1="${X(d)}" x2="${X(d)}" y1="${T}" y2="${h - B}"/><text x="${X(d)}" y="${h - B + 16}" text-anchor="middle">${Math.round(d * 100)}%</text>`;
+  const st = nice((y1 - y0), 4).step; for (let v = Math.ceil(y0 / st) * st; v <= y1; v += st) s += `<text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${esc(usd(v))}</text>`;
+  s += `</g><line x1="${L}" x2="${w - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--crit)" stroke-dasharray="4 3"/><text x="${w - R}" y="${Y(0) - 5}" text-anchor="end" class="g-axis" style="fill:var(--crit-ink)">break-even</text>`;
+  for (const o of ss) { const v = o.qty ? o.contrib / o.qty : 0, P = m.items.find(p => p.id === o.pid);
+    s += `<circle cx="${X(o.depth)}" cy="${Y(v)}" r="${Math.min(9, 4 + o.qty)}" fill="${o.ch === 'amz' ? C[2] : C[0]}" fill-opacity=".8" stroke="var(--glass-strong)" stroke-width="2" data-tip="${esc(tipRows(o.part + ' · ' + dLong(o.date), [['Channel', chName(o.ch)], ['Discount', pct(o.depth, 1)], ['Units', n0(o.qty)], ['Net / unit', usd(o.net / (o.qty || 1), 2)], ['Contribution / unit', usd(v, 2)], ['Promotion', P ? P.name : '—'], ['Matched by', o.how]]))}"/>`; }
+  s += `<text x="${(L + w - R) / 2}" y="${h - 4}" text-anchor="middle" class="g-axis">Discount off list price</text></svg>`;
+  return `<div class="chart">${s}</div><div class="legend"><span><i style="background:${C[0]}"></i>Wayfair order</span><span><i style="background:${C[2]}"></i>Amazon order</span><span>Dot size = units · y = contribution per unit after fees and landed cost (before ads)</span></div>`;
+}
+
+// ---------- recommendations ----------
+function promoPlan(m) {
+  const today = m.today, plan = [], ins = [];
+  const C = (ch, part) => m.econ(ch, part);
+  const wfParts = Object.keys(M.P).filter(k => M.P[k].base && passProd(k));
+  const cover = part => { const v = (m.v30[part] || 0) / 30, st = (m.inv[part] || {}).onHand || 0; return { st, v, days: v ? st / v : (st ? Infinity : 0) }; };
+  const shortWf = m.items.filter(p => p.ch === 'wf' && !p.optOut && p.state === 'ended' && diffDays(p.start, p.end) <= 6);
+  const longWf = m.items.filter(p => p.ch === 'wf' && !p.optOut && diffDays(p.start, p.end) > 30 && p.s.days);
+  const upd = L => { const d = sum(L, p => p.s.days); return d ? sum(L, p => p.s.units) / d : 0; };
+  const shortUpd = upd(shortWf), longUpd = upd(longWf);
+  const wfShortSales = m.sales.filter(s => s.ch === 'wf' && shortWf.some(p => p.id === s.pid));
+  const med = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : null; };
+  const evDepth = med(wfShortSales.map(s => s.depth)) ?? 0.3;
+  if (shortUpd && longUpd) ins.push(`Short Wayfair events (2–5 days) sell <b>${shortUpd.toFixed(2)} units/day</b> vs <b>${longUpd.toFixed(2)}</b> on the always-on events — ${shortUpd > longUpd ? `${(shortUpd / longUpd).toFixed(1)}× more. Join every short event you qualify for.` : 'no better, so deep short events are not worth their margin.'}`);
+  // 1) Wayfair events open for submission
+  for (const ev of m.items.filter(p => p.ch === 'wf' && p.state === 'open' && S.platform !== 'amz')) {
+    const go = [], skip = [];
+    for (const part of wfParts) { const e = C('wf', part), cv = cover(part); if (!e || !cv.st) continue; (e.at(evDepth) > 0 ? go : skip).push({ part, e, cv }); }
+    go.sort((a, b) => b.e.at(evDepth) - a.e.at(evDepth));
+    const days = diffDays(ev.start, ev.end) + 1, estU = shortUpd * days, avgC = go.length ? sum(go, g => g.e.at(evDepth)) / go.length : 0, dl = diffDays(today, ev.deadline);
+    plan.push({ pri: dl <= 7 ? 1 : 2, when: `Submit by ${dLong(ev.deadline)} (${dl} days) · runs ${dLong(ev.start)} – ${dLong(ev.end)}`, ch: 'wf', action: `Join "${ev.name}"`, skus: go.slice(0, 12).map(g => g.part), depth: `≤ ${pct(evDepth)}`,
+      why: `Wayfair recommends ${ev.recommended || 'some'} SKUs. At ${pct(evDepth)} off (your median in past short events) these ${go.length} in-stock SKUs still earn money.${skip.length ? ` Keep out ${skip.map(g => g.part).join(', ')} — loses money at that depth (break-even ${skip.map(g => pct(Math.max(0, g.e.be))).join(', ')}).` : ''}`,
+      impact: `≈ ${n0(Math.max(1, estU))} unit${Math.round(estU) > 1 ? 's' : ''} · ${usd(Math.max(1, estU) * avgC)} contribution` });
+  }
+  // 2) depth above break-even on live / upcoming promotions
+  const live = m.items.filter(p => p.state === 'live' || p.state === 'upcoming');
+  const deep = {};
+  for (const s of m.sales.filter(s => s.date > addDays(today, -21) && s.pid)) { const e = C(s.ch, s.part); if (e && s.depth > e.be + 0.005) { const k = s.ch + '|' + s.part; (deep[k] = deep[k] || { ch: s.ch, part: s.part, e, n: 0, loss: 0, d: [] }); deep[k].n += s.qty; deep[k].loss += s.contrib; deep[k].d.push(s.depth); } }
+  for (const g of Object.values(deep)) {
+    if (S.platform !== 'all' && g.ch !== S.platform) continue;
+    if (g.ch === 'amz' && m.items.some(p => p.ch === 'amz' && p.state === 'live' && diffDays(today, p.end) <= 14 && (p.skus || []).includes(g.part))) continue;
+    const evs = live.filter(p => p.ch === g.ch && (p.ch === 'wf' || (p.skus || []).includes(g.part))).map(p => p.name);
+    plan.push({ pri: 1, when: 'Now', ch: g.ch, action: g.ch === 'amz' ? `Reduce the Amazon discount on ${g.part}` : `Cap the funded discount on ${g.part}`, skus: [g.part], depth: `≤ ${pct(Math.max(0, g.e.safe))} (break-even ${pct(Math.max(0, g.e.be))})`,
+      why: `Sold ${n0(g.n)} units in the last 3 weeks at ${pct(Math.min(...g.d))}–${pct(Math.max(...g.d))} off, above break-even: ${usd(Math.abs(g.loss))} of contribution lost. ${g.ch === 'wf' ? `In Partner Home › Promotions › ${evs.slice(0, 2).join(' / ') || 'the event'} › Manage Products, lower its discount or remove it.` : 'Coupons stack with Buy X Get Y; keep the combined discount under break-even or raise the list price.'}`,
+      impact: `Stops ≈ ${usd(-g.loss / Math.max(1, g.n))} loss per unit` });
+  }
+  // 3) Amazon coupon / promotion ending soon
+  for (const p of m.items.filter(p => p.ch === 'amz' && p.state === 'live' && diffDays(today, p.end) <= 14 && S.platform !== 'wf')) {
+    const part = (p.skus || [])[0], e = part && C('amz', part); if (!e) continue;
+    const safe = Math.max(0, Math.floor(e.safe * 20) / 20), atCur = e.at(p.disc || 0);
+    plan.push({ pri: 2, when: `Before ${dLong(p.end)}`, ch: 'amz', action: atCur < 0 ? `Don't renew "${p.name}" at ${pct(p.disc)}` : `Renew "${p.name}" for the holidays`, skus: [part], depth: safe >= 0.05 ? `Coupon ${pct(safe)}` : 'No coupon',
+      why: `${(() => { const L = m.sales.filter(x => x.pid === p.id); return L.length ? `${n0(sum(L, x => x.qty))} units sold with it so far (${usd(sum(L, x => x.contrib))} contribution). ` : ''; })()}At ${pct(p.disc)} off each unit ${atCur < 0 ? 'loses' : 'earns'} ${usd(Math.abs(atCur), 2)} after referral fee, Multichannel fulfillment and landed cost (+$5 + 2.5% coupon fee). ${safe >= 0.05 ? `A ${pct(safe)} coupon keeps ~10% margin` : 'Even a 5% coupon would not leave a 10% margin — rely on ads/visibility instead of discount'}${(m.items.find(x => x.id === 'amz-bxgy') || {}).state === 'live' ? '; "buy 2 save 15%" runs until 31 Dec for multi-unit orders.' : '.'}`,
+      impact: `${usd(e.at(safe), 2)} per unit at ${pct(safe)}` });
+  }
+  // 4) free-storage clock: clear stock before CastleGate storage fees start
+  const lots = {};
+  for (const part of wfParts) { const fl = m.freeLeft(part), cv = cover(part); if (!fl || fl.left > 75 || fl.left < 0) continue; const left = cv.st - cv.v * fl.left; if (left < 1) continue; (lots[fl.po] = lots[fl.po] || { fl, parts: [] }).parts.push({ part, left, cv, e: C('wf', part) }); }
+  for (const { fl, parts } of Object.values(lots)) {
+    parts.sort((a, b) => b.left - a.left); const ok = parts.filter(x => x.e && x.e.safe > 0.15);
+    if (S.platform === 'amz') continue;
+    plan.push({ pri: fl.left <= 30 ? 1 : 2, when: `Before ${dLong(fl.end)} (${fl.left} free days left on ${fl.po})`, ch: 'wf', action: 'Clearance push on slow stock', skus: ok.slice(0, 8).map(x => x.part), depth: ok.length ? `${pct(Math.min(...ok.map(x => Math.max(0, x.e.safe))))}–${pct(Math.max(...ok.map(x => Math.max(0, x.e.safe))))} (per-SKU safe max)` : '—',
+      why: `At the current pace about ${n0(sum(parts, x => x.left))} units will still be in CastleGate when storage fees start (from day 91: $0.44/ft³/month, rising to $1.40 after 9 months). Use a "72 Hour Clearout"/Clearance event or a deeper Cyber Month price on these SKUs only.`,
+      impact: `Moves up to ${n0(sum(ok.slice(0, 8), x => x.left))} units before fees` });
+  }
+  // 5) do not discount SKUs that are about to run out
+  const lowCover = wfParts.filter(part => { const cv = cover(part); return cv.st > 0 && cv.days < 21; });
+  if (lowCover.length && S.platform !== 'amz') plan.push({ pri: 3, when: 'Now', ch: 'wf', action: 'Take low-stock SKUs out of deep events', skus: lowCover, depth: 'Full price / shallow', why: `Under 3 weeks of stock at the current pace — discounting only sells out faster at lower margin.`, impact: 'Protects margin on the last units' });
+  // 6) retail calendar ahead
+  for (const c of m.cal.filter(c => c.state === 'upcoming' && diffDays(today, c.start) <= 100 && (S.platform === 'all' || c.ch === 'all' || c.ch === S.platform))) {
+    const a = /shipping/i.test(c.name) ? ['Push ads, not discounts', 'Last delivery-by-Christmas window: raise ad budgets on in-stock SKUs and keep current promotions; deeper discounts after this week mostly win January deliveries.']
+      : /clearance|after-christmas/i.test(c.name) ? ['Clear aged and slow stock', 'Customers expect clearance pricing; use it for SKUs with the most stock cover and the shortest free-storage clock, not best sellers.']
+      : /prime day/i.test(c.name) ? ['Plan a Prime-exclusive discount', 'Needs a 30-day price history and inventory; set the list price now so the deal price is credible.']
+      : ['Prepare the event', 'Submit when Wayfair opens it (usually 3–5 weeks ahead) with SKUs that stay above break-even at ~30% off.'];
+    plan.push({ pri: 3, when: `${dLong(c.start)} – ${dLong(c.end)}${c.confirmed ? '' : ' (expected)'}`, ch: c.ch, action: `${c.name}: ${a[0]}`, skus: [], depth: '—', why: a[1], impact: '' });
+  }
+  plan.sort((a, b) => a.pri - b.pri);
+  return { plan, ins, evDepth, shortUpd, longUpd };
+}
+
+function viewPromos() {
+  const m = promoModel(), [f, t] = range(), today = m.today;
+  const passCh = x => S.platform === 'all' || x.ch === S.platform || x.ch === 'all';
+  const all = m.sales.filter(s => passCh(s) && passProd(s.part)), cur = all.filter(s => s.date >= f && s.date <= t);
+  const [pf, pt] = prevRange(), prev = all.filter(s => s.date >= pf && s.date <= pt);
+  const tot = L => ({ rev: sum(L, s => s.rev), promo: sum(L, s => s.promo), units: sum(L, s => s.qty), onPromo: sum(L.filter(s => s.promo > 0.005), s => s.rev), c: sum(L, s => s.contrib), cPromo: sum(L.filter(s => s.promo > 0.005), s => s.contrib), uPromo: sum(L.filter(s => s.promo > 0.005), s => s.qty) });
+  const a = tot(cur), b = tot(prev), items = m.items.filter(passCh);
+  const liveN = items.filter(p => p.state === 'live' && !p.optOut), upN = items.filter(p => p.state === 'upcoming' || p.state === 'open'), nextDl = items.filter(p => p.deadline && p.deadline >= today).sort((x, y) => x.deadline.localeCompare(y.deadline))[0];
+  const per = period(f, t), promoFees = per.a.amzPromoFee || 0;
+  const pl = promoPlan(m);
+  // insights
+  const ins = [...pl.ins];
+  const bandOf = d => PR_BANDS.find(([lo, hi]) => d >= lo && d < hi)[2];
+  const byBand = groupBy(all, s => bandOf(s.depth));
+  const bandRows = PR_BANDS.map(([, , l]) => { const L = byBand.get(l) || []; const u = sum(L, s => s.qty); return { l, u, orders: L.length, c: u ? sum(L, s => s.contrib) / u : null, rev: sum(L, s => s.rev) }; });
+  const topBand = [...bandRows].sort((x, y) => y.u - x.u)[0];
+  if (topBand && topBand.u) ins.push(`Most units sold at <b>${topBand.l} off</b> (${n0(topBand.u)} of ${n0(sum(bandRows, r => r.u))} units), earning ${usd(topBand.c, 2)} per unit. ${(() => { const best = bandRows.filter(r => r.u >= 2 && r.c != null).sort((x, y) => y.c * y.u - x.c * x.u)[0]; return best && best.l !== topBand.l ? `The most total contribution came from <b>${best.l}</b> (${usd(best.c * best.u)}).` : ''; })()}`);
+  const evDone = items.filter(p => p.s && p.s.days && !p.optOut && p.ch !== 'all');
+  const bestEv = [...evDone].filter(p => p.s.units).sort((x, y) => y.s.upd - x.s.upd)[0]; if (bestEv) ins.push(`Best promotion by pace: <b>${esc(bestEv.name)}</b> — ${bestEv.s.upd.toFixed(2)} units/day${bestEv.s.lift != null ? ` (${bestEv.s.lift >= 0 ? '+' : ''}${pct(bestEv.s.lift)} vs the channel's average day)` : ''}, ${usd(bestEv.s.contrib)} contribution.`);
+  const losers = evDone.filter(p => p.s.contrib < -0.5); if (losers.length) ins.push(`${losers.length} promotion${losers.length > 1 ? 's' : ''} lost money after fees and landed cost: ${losers.map(p => `<b>${esc(p.name)}</b> (${usd(p.s.contrib)})`).join(', ')}.`);
+  const dead = items.filter(p => p.ch === 'wf' && !p.optOut && p.state !== 'open' && p.s.days >= 2 && !p.s.units); if (dead.length) ins.push(`${dead.length} Wayfair events had no attributed sale (${dead.map(p => esc(p.name.replace(/ - .*$/, ''))).join(', ')}) — overlapping events split the same traffic; the discount, not the event count, drives demand.`);
+  const amzS = all.filter(s => s.ch === 'amz'); if (amzS.length && S.platform !== 'wf') { const used = amzS.filter(s => s.pid); ins.push(`Amazon: ${used.length} of ${amzS.length} orders used a promotion (${amzS.filter(s => s.pid === 'amz-coupon25').length} coupon, ${amzS.filter(s => s.pid === 'amz-bxgy').length} buy-2-save-15%). Seller Central still shows 0 coupon redemptions — its report lags the order data.`); }
+  const noSale = Object.keys(M.P).filter(k => M.P[k].base && passProd(k) && !all.some(s => s.part === k) && (m.inv[k] || {}).onHand > 0); if (noSale.length && S.platform !== 'amz') ins.push(`${noSale.length} in-stock SKUs never sold despite being in every event (${noSale.slice(0, 8).join(', ')}${noSale.length > 8 ? '…' : ''}) — check content, reviews and retail price before adding more discount.`);
+  ins.push(`Sample size: ${n0(all.length)} order lines since ${dLong(m.sales.map(s => s.date).sort()[0] || today)} — treat price-response readings as directional until there are more orders.`);
+
+  // ladder per SKU × channel
+  const ladder = [];
+  for (const [k, L] of groupBy(all, s => s.ch + '|' + s.part)) { const [ch, part] = k.split('|'), e = m.econ(ch, part); if (!e) continue; const ds = L.map(s => s.depth).sort((x, y) => x - y), last = [...L].sort((x, y) => y.date.localeCompare(x.date))[0];
+    ladder.push({ part, ch, list: e.list, cust: ch === 'wf' ? e.retail * (1 - last.depth) : e.list * (1 - last.depth), cost: e.cost + e.fee, units: sum(L, s => s.qty), dmin: ds[0], dmed: ds[Math.floor(ds.length / 2)], dmax: ds[ds.length - 1], last: last.depth, be: e.be, safe: e.safe, cpu: sum(L, s => s.contrib) / (sum(L, s => s.qty) || 1), stock: (m.inv[part] || {}).onHand || 0 }); }
+  for (const part of Object.keys(M.P)) if (M.P[part].base && passProd(part) && S.platform !== 'amz' && !ladder.some(r => r.part === part && r.ch === 'wf')) { const e = m.econ('wf', part); if (e) ladder.push({ part, ch: 'wf', list: e.list, cust: null, cost: e.cost + e.fee, units: 0, dmin: null, dmed: null, dmax: null, last: null, be: e.be, safe: e.safe, cpu: null, stock: (m.inv[part] || {}).onHand || 0 }); }
+  const stTag = r => r.dmed == null ? '<span class="tag">No sales</span>' : r.last > r.be + 0.005 ? '<span class="tag bad">Over break-even</span>' : r.last > r.safe ? '<span class="tag warn">Thin margin</span>' : '<span class="tag good">Healthy</span>';
+  const chTag = v => `<span class="tag ${v === 'amz' ? 'tt' : ''}">${chName(v)}</span>`;
+
+  // promotion performance table
+  const perf = items.filter(p => p.s).map(p => ({ ...p, ...p.s, period: p.start, stateL: (PR_STATE[p.state] || [p.status])[0], cpu: p.s.units ? p.s.contrib / p.s.units : null }));
+  const stCell = (v, r) => `<span class="tag ${(PR_STATE[r.state] || [])[1] || ''}">${esc(v)}</span>`;
+  const dlAlert = items.filter(p => p.state === 'open' && p.deadline).map(p => `<div class="alert ${diffDays(today, p.deadline) <= 7 ? 'crit' : 'warn'}"><span class="ic">⏱</span><div><b>${esc(p.name)}: submission closes ${dLong(p.deadline)} (${diffDays(today, p.deadline)} days)</b><span>Runs ${dLong(p.start)} – ${dLong(p.end)} · Wayfair recommends ${p.recommended || '—'} of your SKUs · Partner Home › Promotions.</span></div></div>`).join('');
+
+  const planRows = pl.plan.map((r, i) => ({ ...r, i, skuTxt: r.skus.join(', ') }));
+  return `${pageHead('Deals &amp; Promotions', `${rangeText()} · promotion list as of ${dLong(m.at || today)} (Seller Central + Partner Home, refreshed weekly) · sales matched to promotions automatically every 15 minutes`)}
+  <div class="grid g-kpi k3">
+    ${kpi('Live promotions', n0(liveN.length), `${liveN.filter(p => p.ch === 'wf').length} Wayfair · ${liveN.filter(p => p.ch === 'amz').length} Amazon`, 'Promotions running today (Amazon coupons, Buy X Get Y; Wayfair sale events you are submitted to).')}
+    ${kpi('Upcoming', n0(upN.length), nextDl ? `next deadline <b>${dLong(nextDl.deadline)}</b> · ${esc(nextDl.name.replace(/ - .*$/, ''))}` : 'no open deadlines', 'Submitted events not started yet + events open for submission.')}
+    ${kpi('Sales on promotion', pct(a.rev ? a.onPromo / a.rev : null), `${usd(a.onPromo)} of ${usd(a.rev)} revenue · ${n0(a.uPromo)} units`, 'Share of revenue from order lines that carried a discount.')}
+    ${kpi('Avg discount', pct(a.rev ? a.promo / a.rev : null, 1), `${delta(a.rev ? a.promo / a.rev : 0, b.rev ? b.promo / b.rev : 0, { invert: true, pp: true })} ${vsPrev()}`, 'Promotion $ ÷ revenue at list price (Wayfair: base cost; Amazon: selling price).')}
+    ${kpi('Promotion cost', usd(a.promo + promoFees), `discounts ${usd(a.promo)}${promoFees ? ` + Amazon promo fees ${usd(promoFees)}` : ''}`, 'Seller-funded discounts plus coupon / promotion fees Amazon has billed in the period.')}
+    ${kpi('Contribution on promo sales', usd(a.cPromo), `${pct(a.onPromo ? a.cPromo / a.onPromo : null, 1)} of promo revenue · ${usd(a.uPromo ? a.cPromo / a.uPromo : 0, 2)}/unit`, 'NMV − platform fees − Multichannel − landed COGS on discounted sales, before ads.')}
+  </div>
+  ${dlAlert}
+  ${card('Suggested promotion plan', 'Generated from your order history, unit costs, stock cover, the free-storage clock and the event calendar. Recalculated on every data sync.', planRows.length ? `<div class="plan">${planRows.map(r => `<div class="plan-row p${r.pri}"><div class="plan-when"><span class="tag ${r.pri === 1 ? 'bad' : r.pri === 2 ? 'warn' : ''}">${r.pri === 1 ? 'Do now' : r.pri === 2 ? 'This month' : 'Plan ahead'}</span><small>${esc(r.when)}</small></div><div class="plan-body"><b>${esc(r.action)}</b> ${chTag(r.ch)}<p>${r.why}</p>${r.skus.length ? `<div class="plan-skus">${r.skus.map(k => `<span>${esc(k)}</span>`).join('')}</div>` : ''}</div><div class="plan-num"><small>Depth</small><b>${esc(r.depth)}</b>${r.impact ? `<small>Expected</small><b>${esc(r.impact)}</b>` : ''}</div></div>`).join('')}</div>` : '<div class="empty">Nothing to do right now</div>')}
+  <section class="card glass insights"><div class="card-head"><div><h3>Insights</h3><p class="sub">What the promotion history says</p></div></div><ul>${ins.map(x => `<li>${x}</li>`).join('')}</ul></section>
+  ${card('Promotion calendar', 'Past, live and upcoming promotions on both channels, with each order placed on the promotion it was sold under. Hover a bar for terms and results.', promoGantt(m), { cls: 'big-chart' })}
+  ${card('Daily units and promotion windows', 'Selected period · shaded = short events and Amazon Black Friday Week', promoDaily(m, f, t))}
+  <div class="grid g-2">
+    ${card('Which discount sells', 'Units sold at each discount depth, and what each unit earned there (all history)', vbars(bandRows.map(r => ({ label: r.l, v: r.u, tip: tipRows(r.l + ' off', [['Units', n0(r.u)], ['Order lines', n0(r.orders)], ['Revenue', usd(r.rev)], ['Contribution / unit', r.c == null ? '—' : usd(r.c, 2)]]) })), { h: 210 }) + hbars(bandRows.filter(r => r.u).map(r => ({ label: r.l, v: r.c || 0, sub: ' / unit', tip: tipRows(r.l + ' off', [['Contribution / unit', usd(r.c, 2)], ['Units', n0(r.u)]]) })), { fmt: v => usd(v, 0), color: SER()[3] }))}
+    ${card('Discount vs profit per order', 'Every order line: how deep the discount was and what the unit earned', promoScatter(m, all))}
+  </div>
+  ${card('Promotion performance', 'Units/day uses the days a promotion was the one sales were attributed to (overlapping Wayfair events: the shortest wins). Lift = units/day vs the channel average day.', table('promoperf', [
+    { k: 'name', l: 'Promotion', f: (v, r) => `<b>${esc(v)}</b><small class="sub" style="display:block">${esc(r.type)}${r.terms ? ' · ' + esc(r.terms) : ''}</small>` }, { k: 'ch', l: 'Channel', f: chTag },
+    { k: 'period', l: 'Dates', f: (v, r) => `${dShort(r.start)} – ${dShort(r.end)}` }, { k: 'stateL', l: 'Status', f: stCell }, { k: 'orders', l: 'Orders', num: true, f: n0 }, { k: 'units', l: 'Units', num: true, f: n0 },
+    { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, { k: 'promo', l: 'Discount $', num: true, f: v => usd(v) }, { k: 'depth', l: 'Avg depth', num: true, f: v => pct(v, 1) },
+    { k: 'upd', l: 'Units / day', num: true, f: v => v == null ? '—' : v.toFixed(2) }, { k: 'lift', l: 'Lift', num: true, neg: true, f: v => v == null ? '—' : (v >= 0 ? '+' : '') + pct(v) },
+    { k: 'contrib', l: 'Contribution', num: true, neg: true, f: v => usd(v) }, { k: 'cpu', l: 'Per unit', num: true, neg: true, f: v => v == null ? '—' : usd(v, 2) }], perf, { def: { k: 'period', d: 'desc' } }))}
+  ${card('Discount ladder by SKU', 'How deep each SKU can go. Break-even = discount at which a unit stops covering fees and landed cost; Safe max keeps 10% of list price as contribution (room for ads). Customer price for Wayfair ≈ retail × (1 − discount).', table('promoladder', [
+    { k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'ch', l: 'Channel', f: chTag }, { k: 'list', l: 'List / base', num: true, f: v => usd(v, 2) }, { k: 'cust', l: 'Customer price (last)', num: true, f: v => v == null ? '—' : usd(v, 2) },
+    { k: 'cost', l: 'Cost / unit', num: true, f: v => usd(v, 2) }, { k: 'units', l: 'Units', num: true, f: n0 }, { k: 'dmed', l: 'Depth sold (min · med · max)', num: true, f: (v, r) => v == null ? '—' : `${pct(r.dmin)} · <b>${pct(v)}</b> · ${pct(r.dmax)}` },
+    { k: 'last', l: 'Last depth', num: true, f: v => pct(v) }, { k: 'be', l: 'Break-even', num: true, f: v => `<b>${pct(Math.max(0, v))}</b>` }, { k: 'safe', l: 'Safe max', num: true, f: v => pct(Math.max(0, v)) },
+    { k: 'cpu', l: 'Contribution / unit', num: true, neg: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'stock', l: 'Stock', num: true, f: n0 }, { k: 'st', l: 'Status', f: (v, r) => stTag(r) }], ladder, { def: { k: 'units', d: 'desc' } }))}
+  <p class="note">How sales are matched: Amazon — promotion IDs on each order item (coupon "PLM-…", Buy X Get Y "Percent Off …"). Wayfair — the sale event on the purchase order when the API returns it, otherwise the shortest event running on the order date; the discount itself is exact (base cost − wholesale paid). Contribution is before ads.</p>`;
+}
+
+const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, promos: viewPromos, ads: viewAds, quality: viewQuality, inventory: viewInventory };
 function render() {
   renderSidebar();
   const y = scrollY; $('#view').innerHTML = VIEWS[S.tab](); if (render.keep) scrollTo(0, y); render.keep = false;

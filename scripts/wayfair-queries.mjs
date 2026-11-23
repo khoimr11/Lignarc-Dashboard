@@ -121,7 +121,8 @@ export default async function wayfair({ gql, http, tok }) {
   delete out.statuses;
 
   // 3c) Wayfair sale event (promotion) behind each PO line: name, type, duration — attributes every sale to its promotion
-  await step('sale', async () => {
+  // castlegatePurchaseOrders currently returns a server-side null for this supplier → off unless WF_SALE=1 (dashboard falls back to event windows)
+  if (process.env.WF_SALE === '1') await step('sale', async () => {
     if (!whIds.size) throw new Error('no warehouse ids');
     const rows = [], pos = [...new Set((out.orders || []).map(r => r[0]))], errs = [];
     // query by PO numbers in small batches (the date-interval form returns a server-side null)
