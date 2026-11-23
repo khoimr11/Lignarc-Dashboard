@@ -1663,8 +1663,8 @@ const stamp = updated => { const u = new Date(updated || (D.meta.at * 1000) || D
 function start(data, updated, raw) {
   D = data; D.wf = D.wf || {}; D.meta = D.meta || {}; build(); stamp(updated);
   $('#login').hidden = true; $('#app').hidden = false;
-  const h = location.hash.slice(1); setTab(VIEWS[h] ? h : 'overview');
   LIVE = { raw, updated };
+  const h = location.hash.slice(1); setTab(VIEWS[h] ? h : 'overview');
 }
 // Live mode: the data file changes whenever the 15-minute API sync finds something new — poll it (no login, no cost) and redraw in place
 async function livePoll() {
