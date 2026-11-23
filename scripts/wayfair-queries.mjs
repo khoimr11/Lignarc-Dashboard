@@ -123,18 +123,21 @@ export default async function wayfair({ gql, http, tok }) {
   // 3c) Wayfair sale event (promotion) behind each PO line: name, type, duration — attributes every sale to its promotion
   await step('sale', async () => {
     if (!whIds.size) throw new Error('no warehouse ids');
-    const rows = [];
-    for (const hasResponse of [true, false]) for (let page = 1; page < 60; page++) {
-      const d = await q(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput!, $p: Int!){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:$p, pageSize:50){ pageInfo { hasNextPage } nodes { purchaseOrderNumber supplierCastlegatePurchaseOrderProducts { supplierPartNumber wholesalePrice supplierPurchaseOrderProductSaleEvent { saleEventId type name duration { startDate endDate } } } } } }`,
-        { i: { filter: { hasResponse, warehouseIds: [...whIds], purchaseOrderDateTimeInterval: { startDate: ORDERS_FROM, endDate: new Date(Date.now() + 864e5).toISOString() } } }, p: page });
-      const c = d.castlegatePurchaseOrders;
-      for (const o of c.nodes || []) for (const p of o.supplierCastlegatePurchaseOrderProducts || []) {
+    const rows = [], pos = [...new Set((out.orders || []).map(r => r[0]))], errs = [];
+    // query by PO numbers in small batches (the date-interval form returns a server-side null)
+    for (let i = 0; i < pos.length; i += 10) {
+      const j = await gql(ORDER_API, `query($i: SupplierCastlegatePurchaseOrdersInput!){ castlegatePurchaseOrders(supplierCastlegatePurchaseOrdersInput:$i, page:1, pageSize:50){ nodes { purchaseOrderNumber supplierCastlegatePurchaseOrderProducts { supplierPartNumber wholesalePrice supplierPurchaseOrderProductSaleEvent { saleEventId type name duration { startDate endDate } } } } } }`,
+        { i: { filter: { warehouseIds: [...whIds], purchaseOrderNumbers: pos.slice(i, i + 10) } } });
+      if (j.errors) errs.push(JSON.stringify(j.errors).slice(0, 160));
+      const c = j.data && j.data.castlegatePurchaseOrders;
+      for (const o of (c && c.nodes) || []) for (const p of o.supplierCastlegatePurchaseOrderProducts || []) {
         const e = p.supplierPurchaseOrderProductSaleEvent || {};
         // [po, part, sale event id, type, name, start, end, wholesale]
         rows.push([o.purchaseOrderNumber, p.supplierPartNumber, e.saleEventId || null, e.type || '', e.name || '', day(e.duration && e.duration.startDate), day(e.duration && e.duration.endDate), p.wholesalePrice]);
       }
-      if (!c.pageInfo || !c.pageInfo.hasNextPage) break; await sleep(300);
+      await sleep(300);
     }
+    if (!rows.length && errs.length) throw new Error(errs[0]);
     return rows;
   });
 
