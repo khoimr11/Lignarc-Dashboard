@@ -471,7 +471,7 @@ function delta(cur, prev, { invert = false, pp = false } = {}) {
   const cls = Math.abs(d) < 0.005 ? 'flat' : ((d > 0) !== invert ? 'up' : 'down');
   return `<span class="delta ${cls}">${d > 0 ? '▲' : d < 0 ? '▼' : ''} ${pp ? (d * 100).toFixed(1) + ' pp' : pct(Math.abs(d), Math.abs(d) < 0.1 ? 1 : 0)}</span>`;
 }
-const kpi = (label, val, meta = '', info = '', sp = null) => `<div class="kpi card glass"><div class="lbl"><span>${label}</span>${info ? `<span class="info" data-tip="${esc(`<b>${esc(label)}</b><span style="color:var(--ink2)">${esc(info)}</span>`)}">i</span>` : ''}</div><div class="val">${val}</div>${sp ? spark(sp.vals, sp.color, sp.dash) : ''}<div class="meta">${meta}</div></div>`;
+const kpi = (label, val, meta = '', info = '', sp = null) => `<div class="kpi card glass"><div class="lbl"><span>${label}</span>${info ? `<span class="info" data-tip="${esc(`<b>${esc(label.replace(/<[^>]+>/g, ''))}</b><span style="color:var(--ink2)">${esc(info)}</span>`)}">i</span>` : ''}</div><div class="val">${val}</div>${sp ? spark(sp.vals, sp.color, sp.dash) : ''}<div class="meta">${meta}</div></div>`;
 function spark(vals, color, dash) {
   const v = vals.map(x => x == null || !isFinite(x) ? null : x), ok = v.filter(x => x != null); if (ok.length < 2) return '';
   const W = 200, H = 34, mx = Math.max(...ok), mn = Math.min(0, ...ok), n = v.length, X = i => (n === 1 ? W / 2 : i / (n - 1) * W), Y = x => H - 3 - (x - mn) / (mx - mn || 1) * (H - 6);
@@ -630,7 +630,7 @@ function viewSales() {
     ${card('By size', 'Units sold per vanity width', vbars(bySize.map(r => ({ label: sizeLbl(r.k), v: r.units, tip: tipRows(sizeLbl(r.k), [['Units', n0(r.units)], ['Revenue', usd(r.rev)], ['Type', r.k ? (r.k >= 60 ? 'Double' : r.k <= 30 ? 'Floating · single' : 'Single') : 'Rolling Cart']]) })), { fmt: n0, colors: [C[0]] }))}
     ${card('By color', '', donut(grp('color', x => x.color || 'No color (cart)').sort((x, y) => y.units - x.units).map(r => ({ label: r.k, v: r.units, extra: [['Revenue', usd(r.rev)]] })), { center: n0(a.units), sub: 'units' }))}
     ${card('By category', 'Bathroom Vanity · Rolling Cart', donut(grp('cat').map(r => ({ label: r.k, v: r.rev, extra: [['Units', n0(r.units)]] })), { fmt: usd, center: usdK(a.rev), sub: 'revenue' }))}
-    ${card('Tried &amp; True (review samples)', 'Not counted as sales · Wayfair pays only the 4% DDA back · cost charged to profit', ttL.length ? `<div class="grid g-kpi" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+    ${card('Tried &amp; True (review samples) ' + chOnly('wf'), 'Not counted as sales · Wayfair pays only the 4% DDA back · cost charged to profit', ttL.length ? `<div class="grid g-kpi" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
         <div><div class="sub">Orders</div><b style="font-size:22px">${new Set(ttL.map(l => l.po)).size}</b></div><div><div class="sub">Units</div><b style="font-size:22px">${n0(sum(ttL, l => l.qty))}</b></div><div><div class="sub">Net cost</div><b style="font-size:22px">${usd(sum(ttPs, x => x.cogs + x.cg - x.net))}</b></div></div>
         ${table('tt', [{ k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'PO' }, { k: 'part', l: 'SKU' }, { k: 'qty', l: 'Units', num: true }, { k: 'state', l: 'State' }], ttL, { def: { k: 'date', d: 'desc' } })}` : '<div class="empty">No Tried &amp; True orders in this period</div>')}
   </div>
@@ -783,7 +783,7 @@ function amzTrafficCard(f, t) {
     ${kpi('Conversion', pct(a.conv, 1), `${b ? delta(a.conv, b.conv, { pp: true }) + ' ' + vsPrev() + ' · ' : ''}unit session ${pct(a.ucv, 1)}`, 'Order items ÷ sessions (Amazon calls units ÷ sessions "Unit Session Percentage").', { vals: bk.map(x => x.conv), color: C[4], dash: true })}
     ${kpi('Featured offer (Buy Box)', pct(a.bb, 1), 'Share of page views where Lignarc won the Buy Box', 'Session-weighted Buy Box percentage.')}
   </div>
-  ${card('Amazon traffic & conversion', `Bars = sessions · line = page views · dashed = conversion · Amazon Sales & Traffic report (Brand Analytics role), refreshed every sync · by ${gran}`, chart, { cls: 'big-chart' })}`;
+  ${card('Amazon traffic & conversion ' + chOnly('amz'), `Bars = sessions · line = page views · dashed = conversion · Amazon Sales & Traffic report (Brand Analytics role), refreshed every sync · by ${gran}`, chart, { cls: 'big-chart' })}`;
 }
 // Amazon: every order's money flow, straight from the Finances transactions (estimate only until Amazon posts the order)
 function amzMoneyCard(f, t) {
@@ -794,7 +794,7 @@ function amzMoneyCard(f, t) {
   const svc = M.amzSvc.filter(x => x.date >= f && x.date <= t && x.kind !== 'refund');
   const svcRows = svc.map(x => ({ date: x.date, what: x.kind === 'ads' ? 'Sponsored Products charge' : x.kind === 'subscription' ? 'Professional selling plan' : (x.desc || x.kind), amount: x.amount, detail: x.kind === 'ads' ? `${usd(x.base, 2)} + tax ${usd(x.tax, 2)}` : '' }));
   const m2 = v => v == null ? '—' : usd(v, 2);
-  return card('Amazon money flow', 'Per order from Seller Central transactions: sales → promotion → referral fee 15% + tax − Amazon discount → payout. Sales tax is collected and remitted by Amazon, so it is excluded.', table('amzflow', [
+  return card('Amazon money flow ' + chOnly('amz'), 'Per order from Seller Central transactions: sales → promotion → referral fee 15% + tax − Amazon discount → payout. Sales tax is collected and remitted by Amazon, so it is excluded.', table('amzflow', [
     { k: 'date', l: 'Date', f: v => dLong(v) }, { k: 'po', l: 'Order' }, { k: 'qty', l: 'Units', num: true }, { k: 'sales', l: 'Sales', num: true, f: m2 }, { k: 'promo', l: 'Promotion', num: true, f: m2 }, { k: 'net', l: 'Net sales', num: true, f: m2 },
     { k: 'ref', l: 'Referral 15%', num: true, f: (v, r) => m2(v) + (r.est ? '*' : '') }, { k: 'tax', l: 'Fee tax', num: true, f: m2 }, { k: 'disc', l: 'Fee discount', num: true, f: m2 }, { k: 'fee', l: 'Amazon fee', num: true, f: (v, r) => `<b>${m2(v)}</b>${r.est ? '*' : ''}` },
     { k: 'payout', l: 'Payout', num: true, f: m2 }, { k: 'status', l: 'Payment', f: v => `<span class="tag ${v === 'Released' ? '' : v === 'Deferred' ? 'tt' : 'bad'}">${esc(v)}</span>` }], rows,
@@ -917,7 +917,7 @@ function reviewsSection() {
         <div class="sub">${esc(((R.listings[r.ch + ':' + r.listing] || {}).name) || r.listing)}${r.variant ? ' · ' + esc(r.variant) : ''}${r.photos ? ` · ${r.photos} photos` : ''}</div>
         ${r.title ? `<h4>${esc(r.title)}</h4>` : ''}<blockquote>“${esc(r.text)}”</blockquote></article>`).join('')}</div>` : '<div class="empty">Amazon B0HJQQ3MY4 has 0 reviews; Wayfair has 1 so far.</div>')}
   </div>
-  ${pmRows.length ? card('Wayfair listing conversion', `Partner Home Product Management · ${esc(pm.window)} · checked ${dLong(pm.asOf)}`, table('pmconv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'rev', l: 'Revenue (90d)', num: true, f: v => v == null ? '—' : usd(v) },
+  ${pmRows.length ? card('Wayfair listing conversion ' + chOnly('wf'), `Partner Home Product Management · ${esc(pm.window)} · checked ${dLong(pm.asOf)}`, table('pmconv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'rev', l: 'Revenue (90d)', num: true, f: v => v == null ? '—' : usd(v) },
       { k: 'conv', l: 'Conversion rate', num: true, f: v => v == null ? '—' : `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(Math.min(1, v / 0.035) * 60)}px"></span>` }], pmRows, { def: { k: 'rev', d: 'desc' } })) : ''}`;
 }
 
@@ -931,26 +931,26 @@ function viewAds() {
   const listings = Object.entries(ad.byListing).map(([lid, x]) => { const kids = M.listingParts[lid] || []; const p = M.P[kids[0]] || {}; return { lid, name: (p.name || lid).replace(/ with .*/i, ''), col: p.col, ...x, roas: x.spend ? x.sales / x.spend : null, alloc: kids.filter(k => ad.byPart[k] > 0.005).map(k => `${k} ${usd(ad.byPart[k])}`).join(' · ') }; });
   const abk = adBuckets(cur, f, t, autoGran(f, t)), adTip = b => [['Ad spend', usd(b.spend, 2), C[0]], ['Ad sales', usd(b.sales), C[2]], ['ROAS', b.roas == null ? '—' : b.roas.toFixed(1) + '×'], ['ACoS', pct(b.acos, 1)], ['TACoS', b.tacos == null ? 'no sales' : pct(b.tacos, 1)], ['Clicks', n0(b.clicks)], ['CTR', pct(b.ctr, 2)], ['CPC', b.cpc == null ? '—' : usd(b.cpc, 2)], ['Ad orders', n0(b.orders)]];
   const sp = (k, c, dash) => ({ vals: abk.map(b => b[k]), color: C[c], dash });
-  const amzNote = S.platform === 'amz' ? '<p class="note">Amazon Ads data starts once the Amazon Ads API application is approved (submitted Nov 13).</p>' : '';
+  const amzNote = S.platform === 'wf' ? '' : `<div class="alert info"><span class="ic">i</span><div><b>Channel coverage</b><span>Ad spend and TACoS include Amazon (ad charges Amazon billed to the account). Ad sales, ROAS, ACoS, clicks, impressions, CPC, ad orders and the campaign tables are <b>Wayfair only</b> until the Amazon Ads API application is approved — then Amazon campaigns appear here automatically.</span></div></div>`;
   return `${pageHead('Advertising')}
   <div class="grid g-kpi">
     ${kpi('Ad Spend', usd(ad.spend, 0), `${delta(ad.spend, pa.spend, { invert: true })} ${vsPrev()}`, '', sp('spend', 0))}
-    ${kpi('Ad Sales', usd(ad.sales), `${delta(ad.sales, pa.sales)} 14-day attributed, retail price`, 'Retail sales Wayfair attributes to ad clicks/views within 14 days.', sp('sales', 2))}
-    ${kpi('ROAS', roas == null ? '—' : roas.toFixed(1) + '×', `${delta(roas, proas)} ${vsPrev()}`, 'Ad sales ÷ ad spend', sp('roas', 4, true))}
-    ${kpi('ACoS', pct(ad.sales ? ad.spend / ad.sales : null, 1), 'Ad spend ÷ ad sales', '', sp('acos', 4, true))}
+    ${kpi('Ad Sales <span class="tag only wf mini">WF</span>', usd(ad.sales), `${delta(ad.sales, pa.sales)} 14-day attributed, retail price`, 'Retail sales Wayfair attributes to ad clicks/views within 14 days.', sp('sales', 2))}
+    ${kpi('ROAS <span class="tag only wf mini">WF</span>', roas == null ? '—' : roas.toFixed(1) + '×', `${delta(roas, proas)} ${vsPrev()}`, 'Ad sales ÷ ad spend', sp('roas', 4, true))}
+    ${kpi('ACoS <span class="tag only wf mini">WF</span>', pct(ad.sales ? ad.spend / ad.sales : null, 1), 'Ad spend ÷ ad sales', '', sp('acos', 4, true))}
     ${kpi('TACoS', pct(a.rev ? ad.spend / a.rev : null, 1), `${delta(a.rev ? ad.spend / a.rev : null, prev.a.rev ? pa.spend / prev.a.rev : null, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ total Revenue (base cost)', sp('tacos', 4, true))}
-    ${kpi('Clicks', n0(ad.clicks), `CTR ${pct(ad.impr ? ad.clicks / ad.impr : null, 2)} · ${n0(ad.impr)} impressions`, '', sp('clicks', 1))}
-    ${kpi('CPC', ad.clicks ? usd(ad.spend / ad.clicks, 2) : '—', `${delta(ad.clicks ? ad.spend / ad.clicks : null, pa.clicks ? pa.spend / pa.clicks : null, { invert: true })} ${vsPrev()}`, '', sp('cpc', 0))}
-    ${kpi('Ad Orders', n0(ad.orders), `${n0(ad.units)} units attributed`, '', sp('orders', 3))}
+    ${kpi('Clicks <span class="tag only wf mini">WF</span>', n0(ad.clicks), `CTR ${pct(ad.impr ? ad.clicks / ad.impr : null, 2)} · ${n0(ad.impr)} impressions`, '', sp('clicks', 1))}
+    ${kpi('CPC <span class="tag only wf mini">WF</span>', ad.clicks ? usd(ad.spend / ad.clicks, 2) : '—', `${delta(ad.clicks ? ad.spend / ad.clicks : null, pa.clicks ? pa.spend / pa.clicks : null, { invert: true })} ${vsPrev()}`, '', sp('cpc', 0))}
+    ${kpi('Ad Orders <span class="tag only wf mini">WF</span>', n0(ad.orders), `${n0(ad.units)} units attributed`, '', sp('orders', 3))}
   </div>
   ${amzNote}
   ${card('Spend, ad sales and efficiency', `Bars = ad spend · line = attributed ad sales · dashed = ${ADM[S.adm || 'tacos'][0]} · by ${autoGran(f, t)}`, combo3(abk, { bar: { k: 'spend', name: 'Ad spend', short: 'Spend', axis: usdK, lbl: v => usd(v), color: C[0] }, line: { k: 'sales', name: 'Ad sales (14-day)', short: 'Ad sales', axis: usdK, color: C[2] }, dash: { k: S.adm || 'tacos', name: ADM[S.adm || 'tacos'][0], fmt: ADM[S.adm || 'tacos'][1], color: C[4], min: ADM[S.adm || 'tacos'][2] }, tip: adTip }), { actions: `<div class="btn-row">${Object.entries(ADM).map(([k, [l]]) => `<button class="view-toggle" data-adm="${k}" aria-pressed="${(S.adm || 'tacos') === k}">${esc(l.split(' ')[0])}</button>`).join('')}</div>${granBtns()}`, cls: 'big-chart' })}
   <div class="grid g-2">
-    ${card('Traffic', 'Bars = clicks · line = impressions · dashed = CTR', combo3(abk, { bar: { k: 'clicks', name: 'Clicks', axis: n0, color: C[1] }, line: { k: 'impr', name: 'Impressions', short: 'Impr.', axis: v => v >= 1000 ? nf1.format(v / 1000) + 'k' : n0(v), color: C[3] }, dash: { k: 'ctr', name: 'CTR', fmt: v => pct(v, 1), color: C[4], min: 0.002 }, tip: adTip }, { h: 320, w: CW('half') }))}
-    ${card('Cost per click and conversion', 'Bars = ad orders · line = CPC · dashed = ROAS', combo3(abk, { bar: { k: 'orders', name: 'Ad orders', short: 'Orders', axis: n0, color: C[3] }, line: { k: 'cpc', name: 'CPC', axis: v => usd(v, 2), color: C[0] }, dash: { k: 'roas', name: 'ROAS', fmt: v => v.toFixed(1) + '×', color: C[4], min: 1 }, tip: adTip }, { h: 320, w: CW('half') }))}
+    ${card('Traffic ' + chOnly('wf'), 'Bars = clicks · line = impressions · dashed = CTR', combo3(abk, { bar: { k: 'clicks', name: 'Clicks', axis: n0, color: C[1] }, line: { k: 'impr', name: 'Impressions', short: 'Impr.', axis: v => v >= 1000 ? nf1.format(v / 1000) + 'k' : n0(v), color: C[3] }, dash: { k: 'ctr', name: 'CTR', fmt: v => pct(v, 1), color: C[4], min: 0.002 }, tip: adTip }, { h: 320, w: CW('half') }))}
+    ${card('Cost per click and conversion ' + chOnly('wf'), 'Bars = ad orders · line = CPC · dashed = ROAS', combo3(abk, { bar: { k: 'orders', name: 'Ad orders', short: 'Orders', axis: n0, color: C[3] }, line: { k: 'cpc', name: 'CPC', axis: v => usd(v, 2), color: C[0] }, dash: { k: 'roas', name: 'ROAS', fmt: v => v.toFixed(1) + '×', color: C[4], min: 1 }, tip: adTip }, { h: 320, w: CW('half') }))}
   </div>
-  ${card('Campaigns', '', table('camps', [{ k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.id)} · ${esc(r.status || '')}${r.cap ? ' · $' + r.cap + '/day cap' : ''}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: v => n0(v) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }], camps, { def: { k: 'spend', d: 'desc' } }))}
-  ${card('Spend by listing → SKU', 'From the Wayfair SKU report; each listing\'s spend is split across its child SKUs by net revenue (equal split if the listing had no sales)', listings.length ? table('lst', [{ k: 'name', l: 'Listing', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.lid)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'alloc', l: 'Allocated to SKUs', nosort: true }], listings, { def: { k: 'spend', d: 'desc' } }) : '<div class="empty">SKU-level ad data arrives with the next daily sync.</div>')}`;
+  ${card('Campaigns ' + chOnly('wf'), '', table('camps', [{ k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.id)} · ${esc(r.status || '')}${r.cap ? ' · $' + r.cap + '/day cap' : ''}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: v => n0(v) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }], camps, { def: { k: 'spend', d: 'desc' } }))}
+  ${card('Spend by listing → SKU ' + chOnly('wf'), 'From the Wayfair SKU report; each listing\'s spend is split across its child SKUs by net revenue (equal split if the listing had no sales)', listings.length ? table('lst', [{ k: 'name', l: 'Listing', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.lid)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'alloc', l: 'Allocated to SKUs', nosort: true }], listings, { def: { k: 'spend', d: 'desc' } }) : '<div class="empty">SKU-level ad data arrives with the next daily sync.</div>')}`;
 }
 
 function viewQuality() {
@@ -970,6 +970,7 @@ function viewQuality() {
       <dl><div><dt>PO</dt><dd>${esc(c.po)}${c.tt ? ' <span class="tag tt">Tried &amp; True</span>' : ''}</dd></div><div><dt>Delivered</dt><dd>${dLong(c.delivered)}${c.state ? ' · ' + esc(c.state) : ''}</dd></div><div><dt>Photos</dt><dd>${c.photos || '—'}</dd></div><div><dt>Deducted</dt><dd class="${c.deduction ? 'neg' : ''}">${c.deduction ? usd(c.deduction, 2) : 'None'}</dd></div></dl>
     </article>`;
   return `${pageHead('Incidents &amp; Returns', `All cases since launch · from ${esc(I.source || 'Partner Home')} · checked ${dLong(I.asOf)} · refreshed every Thursday`)}
+  <div class="alert info"><span class="ic">i</span><div><b>Channel coverage: Wayfair only</b><span>Incident and return cases come from Partner Home. Amazon has had no return or A-to-z claim yet; Amazon refunds appear in Profit › Deductions &amp; refunds as soon as Seller Central posts them.</span></div></div>
   <div class="grid g-kpi">
     ${kpi('Cases', n0(cases.length), `${n0(new Set(cases.map(c => c.part)).size)} SKUs affected`)}
     ${kpi('Damaged on arrival', n0(dmg), `${pct(unitsAll ? dmg / unitsAll : null, 1)} of ${n0(unitsAll)} units shipped`)}
@@ -978,8 +979,8 @@ function viewQuality() {
   </div>
   ${dmg ? `<div class="alert crit"><span class="ic">!</span><div><b>${dmg} damage cases${cases.some(c => /sink/i.test(c.detail)) ? ' — including a broken sink top (KFFX)' : ''}</b><span>Replacement parts shipped is ${pct(st.partsShipped)}: when Wayfair asks for a replacement part and none is sent, the full order is refunded and deducted. Turning on replacement parts in Partner Home is the cheapest fix; also check the carton and corner protection for the sink top.</span></div></div>` : ''}
   <div class="grid g-2">
-    ${card('By issue', 'Number of cases', donut(byIssue, { center: n0(cases.length), sub: 'cases' }))}
-    ${card('By SKU', 'Cases ÷ units shipped to date', table('qsku', [{ k: 'part', l: 'SKU', f: (v, r) => `<span class="dot" style="background:${colColor(r.col)};display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span><b>${esc(v)}</b> <span class="sub">${esc(r.col || '')}</span>` }, { k: 'issues', l: 'Issue' }, { k: 'n', l: 'Cases', num: true }, { k: 'units', l: 'Shipped', num: true }, { k: 'rate', l: 'Rate', num: true, f: v => pct(v) }, { k: 'ded', l: 'Deducted', num: true, f: v => v ? usd(v, 2) : '—' }], bySku, { def: { k: 'rate', d: 'desc' } }))}
+    ${card('By issue ' + chOnly('wf'), 'Number of cases', donut(byIssue, { center: n0(cases.length), sub: 'cases' }))}
+    ${card('By SKU ' + chOnly('wf'), 'Cases ÷ units shipped to date', table('qsku', [{ k: 'part', l: 'SKU', f: (v, r) => `<span class="dot" style="background:${colColor(r.col)};display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span><b>${esc(v)}</b> <span class="sub">${esc(r.col || '')}</span>` }, { k: 'issues', l: 'Issue' }, { k: 'n', l: 'Cases', num: true }, { k: 'units', l: 'Shipped', num: true }, { k: 'rate', l: 'Rate', num: true, f: v => pct(v) }, { k: 'ded', l: 'Deducted', num: true, f: v => v ? usd(v, 2) : '—' }], bySku, { def: { k: 'rate', d: 'desc' } }))}
   </div>
   <h2 class="sec-title">What customers said</h2>
   <div class="cases">${cases.sort((x, y) => (y.deduction - x.deduction) || y.delivered.localeCompare(x.delivered)).map(caseCard).join('') || '<div class="empty">No cases for the current filters</div>'}</div>`;
@@ -1022,7 +1023,7 @@ function viewInventory() {
     ${kpi('Inbound', n0(openInb.length) + `<small>${openInb.length === 1 ? 'shipment' : 'shipments'}</small>`, inbUnits ? n0(inbUnits) + ' units' : 'quantities pending cost sheet')}
   </div>
   ${poCards || '<div class="empty">No PO matches the PO filter</div>'}
-  ${card('CastleGate inventory', 'Live from the Wayfair inventory API', table('inv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'col', l: 'Collection' }, { k: 'size', l: 'Size', f: v => sizeLbl(v), sv: r => r.size || 0 }, { k: 'color', l: 'Color' }, { k: 'onHand', l: 'On hand', num: true }, { k: 'avail', l: 'Available', num: true }, { k: 'sold30', l: 'Sold 30d', num: true }, { k: 'cover', l: 'Days of cover', num: true, f: v => v == null ? '—' : n0(v) }, { k: 'value', l: 'Value', num: true, f: v => usd(v) }], shownRows, { def: { k: 'onHand', d: 'desc' }, foot: { part: 'Total', onHand: tot.onHand, avail: tot.avail, sold30: sum(rows, r => r.sold30), value: tot.value } }),
+  ${card('CastleGate inventory ' + chOnly('shared'), 'Live from the Wayfair inventory API', table('inv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'col', l: 'Collection' }, { k: 'size', l: 'Size', f: v => sizeLbl(v), sv: r => r.size || 0 }, { k: 'color', l: 'Color' }, { k: 'onHand', l: 'On hand', num: true }, { k: 'avail', l: 'Available', num: true }, { k: 'sold30', l: 'Sold 30d', num: true }, { k: 'cover', l: 'Days of cover', num: true, f: v => v == null ? '—' : n0(v) }, { k: 'value', l: 'Value', num: true, f: v => usd(v) }], shownRows, { def: { k: 'onHand', d: 'desc' }, foot: { part: 'Total', onHand: tot.onHand, avail: tot.avail, sold30: sum(rows, r => r.sold30), value: tot.value } }),
     { actions: `<button class="view-toggle" data-act="hideZero" aria-pressed="${S.hideZero}">${S.hideZero ? 'Show all SKUs' : 'Hide zero-stock SKUs'}</button>` })}`;
 }
 
@@ -1339,7 +1340,167 @@ function viewPromos() {
   <p class="note">How sales are matched: Amazon — promotion IDs on each order item (coupon "PLM-…", Buy X Get Y "Percent Off …"). Wayfair — the sale event on the purchase order when the API returns it, otherwise the shortest event running on the order date; the discount itself is exact (base cost − wholesale paid). Contribution is before ads.</p>`;
 }
 
-const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, promos: viewPromos, ads: viewAds, quality: viewQuality, inventory: viewInventory };
+// ================= Listings & Product Management =================
+// Wayfair: Partner Home Product Management (weekly capture → data.wfListing). Amazon: SP-API Listings Items + Product Type
+// Definitions + A+ Content, every 6 hours (data.amz.listings). Each listing is scored on a furniture-category checklist.
+const WF_IMG = (p, s = 300) => p ? `https://assets.wfcdn.com/im/00000000/resize-h${s}-w${s}%5Ecompr-r85/${p}/basic_demo.jpg` : null;
+const AMZ_IMG = (u, s = 300) => u ? u.replace(/\._[^/]*_\.jpg$/, '.jpg').replace(/\.jpg$/, `._AC_SL${s}_.jpg`) : null;
+const SMALL_W = new Set(['a', 'an', 'and', 'or', 'with', 'for', 'of', 'the', 'in', 'on', 'to', 'by', 'x']);
+const titleCaseOk = s => !String(s || '').split(/\s+/).some(w => /^[a-z]/.test(w) && !SMALL_W.has(w.toLowerCase()));
+function scoreOf(checks) { const k = checks.filter(c => c.ok !== null && c.max), mx = sum(k, c => c.max); return mx ? Math.round(sum(k, c => c.pts) / mx * 100) : null; }
+function listingModel() {
+  if (listingModel.c && listingModel.c.M === M) return listingModel.c;
+  const WL = D.wfListing || { listings: {}, parts: [] }, AL = (D.amz && D.amz.listings) || { rows: [], aplus: [], req: {} };
+  const aplusBy = {}; for (const a of AL.aplus || []) for (const asin of a.asins || []) (aplusBy[asin] = aplusBy[asin] || []).push(a);
+  const rv = (D.reviews && D.reviews.listings) || {};
+  const inv = {}; for (const r of (D.wf && D.wf.inv) || []) inv[r[0]] = +r[2] || 0;
+  const amzRows = AL.rows || [], amzBy = new Map(amzRows.map(r => [r.sku, r]));
+  const wf = (WL.parts || []).map(p => {
+    const [part, status, rev90, units90, conv, launch, listing, visits, impr, imprPct, rating, reviews, img] = p, L = (WL.listings || {})[listing] || {};
+    const ck = [
+      { k: 'title', g: 'Content', label: 'Product name (Title Case)', max: 10, ok: !!L.name && L.name.length >= 25 && L.name.length <= 150 && titleCaseOk(L.name), detail: L.name ? `${L.name.length} characters${titleCaseOk(L.name) ? '' : ' · not Title Case'}` : 'not captured' },
+      { k: 'bullets', g: 'Content', label: 'Feature bullets (8+)', max: 15, pts: L.bullets >= 8 ? 15 : L.bullets >= 6 ? 10 : L.bullets ? 5 : 0, detail: `${L.bullets ?? '—'} bullets` },
+      { k: 'desc', g: 'Content', label: 'Description (700+ chars)', max: 10, pts: L.desc >= 700 ? 10 : L.desc >= 450 ? 6 : L.desc ? 3 : 0, detail: `${L.desc ?? '—'} characters` },
+      { k: 'imgs', g: 'Media', label: 'Images (12+)', max: 15, ok: L.imgs == null ? null : undefined, pts: L.imgs >= 12 ? 15 : L.imgs >= 8 ? 10 : 4, detail: L.imgs == null ? 'not captured yet' : `${L.imgs} images · ${L.env ?? '?'} lifestyle · ${L.silo ?? '?'} silo · ${L.info ?? '?'} dimension/feature` },
+      { k: 'life', g: 'Media', label: 'Lifestyle images (3+)', max: 5, ok: L.env == null ? null : L.env >= 3, detail: L.env == null ? 'not captured yet' : `${L.env} lifestyle` },
+      { k: 'video', g: 'Media', label: 'Product video', max: 10, ok: L.video == null ? null : L.video > 0, detail: L.video ? `${L.video} video` : 'no video on the listing' },
+      { k: 'req', g: 'Data', label: 'Required attributes', max: 15, pts: Math.max(0, 15 - 5 * (L.reqMissing || []).length), detail: (L.reqMissing || []).length ? 'Empty: ' + L.reqMissing.join(', ') : `all ${L.reqFilled || ''} filled` },
+      { k: 'attrw', g: 'Data', label: 'No attribute warnings', max: 5, ok: !L.attrWarn, detail: L.attrWarn ? `${L.attrWarn} attribute warning${L.attrWarn > 1 ? 's' : ''} in Partner Home` : 'none' },
+      { k: 'portal', g: 'Data', label: 'No problems / warnings', max: 5, ok: !sum(L.pwo || [0, 0, 0]), detail: `Problems ${(L.pwo || [])[0] ?? 0} · Warnings ${(L.pwo || [])[1] ?? 0} · Opportunities ${(L.pwo || [])[2] ?? 0}` },
+      { k: 'reviews', g: 'Social proof', label: 'Reviews (5+, 4★+)', max: 10, pts: reviews >= 5 && rating >= 4 ? 10 : reviews >= 1 && rating >= 4 ? 5 : 0, detail: reviews ? `${reviews} review · ${rating}★` : 'no reviews yet' }];
+    for (const c of ck) { if (c.pts == null) c.pts = c.ok ? c.max : 0; if (c.ok === undefined) c.ok = c.pts >= c.max; }
+    return { ch: 'wf', part, listing, status, live: status === 'Live', name: L.name, rev90, units90, conv, visits, impr, imprPct, rating, reviews, launch, img: WF_IMG(img), imgL: WF_IMG(img, 800), L, checks: ck, score: scoreOf(ck), stock: inv[part] ?? null, notes: L.notes || [] };
+  });
+  const amz = amzRows.filter(r => r.level !== 'parent').map(r => {
+    const ap = (aplusBy[r.asin] || []).filter(a => a.status === 'APPROVED'), R = rv['amz:' + r.asin] || {}, err = r.issues.filter(i => i[0] === 'ERROR').length, warn = r.issues.filter(i => i[0] === 'WARNING').length;
+    const buy = r.status.includes('BUYABLE'), nb = r.bullets.length;
+    const ck = [
+      { k: 'title', g: 'Content', label: 'Title (80–200 chars, brand first)', max: 10, ok: !!r.name && r.name.length >= 80 && r.name.length <= 200 && /^lignarc/i.test(r.name), detail: r.name ? `${r.name.length} characters` : 'missing' },
+      { k: 'bullets', g: 'Content', label: '5 bullets, 150+ chars each', max: 15, pts: nb >= 5 && r.bullets.every(x => x >= 150) ? 15 : nb >= 5 ? 10 : nb * 2, detail: `${nb} bullets${nb ? ' · shortest ' + Math.min(...r.bullets) + ' chars' : ''}` },
+      { k: 'desc', g: 'Content', label: 'Description (500+ chars or A+)', max: 5, ok: r.desc >= 500 || ap.length > 0, detail: `${r.desc} characters` },
+      { k: 'kw', g: 'Content', label: 'Search terms 150–249 bytes', max: 5, pts: r.kw >= 150 && r.kw <= 249 ? 5 : r.kw > 249 ? 1 : r.kw ? 2 : 0, detail: r.kw > 249 ? `${r.kw} bytes — over 249, Amazon ignores the field` : `${r.kw} bytes` },
+      { k: 'imgs', g: 'Media', label: 'Images (7+)', max: 15, pts: r.imgs.length >= 7 ? 15 : r.imgs.length >= 5 ? 9 : 4, detail: `${r.imgs.length} images` },
+      { k: 'video', g: 'Media', label: 'Product video', max: 10, ok: null, detail: 'not exposed by the API — check Seller Central › Manage videos (weekly)' },
+      { k: 'aplus', g: 'Media', label: 'A+ content (approved)', max: 10, ok: ap.length > 0, detail: ap.length ? ap.map(a => a.name).join(', ') : 'no A+ module on this ASIN' },
+      { k: 'req', g: 'Data', label: 'Required attributes', max: 10, pts: Math.max(0, 10 - 4 * r.missing.length), detail: r.missing.length ? 'Missing: ' + r.missing.join(', ') : 'all present' },
+      { k: 'issues', g: 'Data', label: 'No listing issues', max: 10, pts: err ? 0 : warn ? 5 : 10, detail: r.issues.length ? `${err} error · ${warn} warning` : 'none' },
+      { k: 'buy', g: 'Data', label: 'Buyable with stock', max: 5, ok: buy && (r.qty || 0) > 0, detail: `${buy ? 'Buyable' : 'Not buyable (' + r.status.join(', ').toLowerCase() + ')'} · qty ${r.qty ?? 0}` },
+      { k: 'reviews', g: 'Social proof', label: 'Reviews (5+, 4★+)', max: 5, pts: R.count >= 5 && R.rating >= 4 ? 5 : R.count ? 2 : 0, detail: R.count ? `${R.count} reviews · ${R.rating}★` : 'no reviews yet' }];
+    for (const c of ck) { if (c.pts == null) c.pts = c.ok ? c.max : 0; if (c.ok === undefined) c.ok = c.pts >= c.max; }
+    return { ch: 'amz', part: r.sku, asin: r.asin, pt: r.pt, live: buy, status: r.status, name: r.name, r, img: AMZ_IMG(r.imgs[0] || r.thumb), gallery: r.imgs.map(u => AMZ_IMG(u, 160)), aplus: ap, checks: ck, score: scoreOf(ck), err, warn, stock: inv[r.sku] ?? null, parent: r.parent };
+  });
+  // cross-channel consistency for SKUs on both
+  const cross = [];
+  for (const a of amz) { const w = wf.find(x => x.part === a.part); if (!w) continue; const L = w.L, r = a.r;
+    if (r.assembly === false && L.assembly && !/^no assembly/i.test(L.assembly)) cross.push({ part: a.part, field: 'Assembly', amz: 'No assembly required', wf: L.assembly });
+    if (r.weight && L.weight && Math.abs(r.weight - L.weight) / L.weight > 0.15) cross.push({ part: a.part, field: 'Product weight', amz: r.weight + ' lb', wf: L.weight + ' lb' });
+  }
+  const out = { M, wf, amz, cross, aplus: AL.aplus || [], req: AL.req || {}, at: AL.at, wfAt: WL.asOf, err: AL.err, hist: (D.amz && D.amz.listingHist) || {}, parents: amzRows.filter(r => r.level === 'parent') };
+  listingModel.c = out; return out;
+}
+const scoreColor = v => v == null ? 'var(--axis)' : v >= 80 ? 'var(--good)' : v >= 60 ? 'var(--warn)' : 'var(--crit)';
+const scoreCell = v => v == null ? '<span class="sub">—</span>' : `<div class="score"><b style="color:${v >= 80 ? 'var(--good-ink)' : v >= 60 ? 'var(--ink)' : 'var(--crit-ink)'}">${v}</b><i><s style="width:${v}%;background:${scoreColor(v)}"></s></i></div>`;
+const chOnly = ch => `<span class="tag only ${ch}">${ch === 'amz' ? 'Amazon only' : ch === 'wf' ? 'Wayfair only' : 'Shared stock · both channels'}</span>`;
+
+function viewListings() {
+  const m = listingModel(), showWf = S.platform !== 'amz', showAmz = S.platform !== 'wf';
+  const wf = m.wf.filter(x => passProd(x.part)), amz = m.amz.filter(x => passProd(x.part) || !M.P[x.part]);
+  const avg = L => { const v = L.map(x => x.score).filter(v => v != null); return v.length ? Math.round(sum(v) / v.length) : null; };
+  const wfLive = wf.filter(x => x.live), amzBuy = amz.filter(x => x.live), amzDisc = amz.filter(x => !x.live);
+  const amzErr = sum(amz, x => x.err), amzWarn = sum(amz, x => x.warn), wfAttrW = sum(Object.values((D.wfListing || {}).listings || {}), l => l.attrWarn || 0);
+  const wfReq = sum(Object.values((D.wfListing || {}).listings || {}), l => (l.reqMissing || []).length), amzReq = sum(amz, x => x.r.missing.length);
+  const asinsBuy = new Set(amzBuy.map(x => x.asin)), aplusAsins = new Set(m.aplus.filter(a => a.status === 'APPROVED').flatMap(a => a.asins));
+  const visits = sum(wf, x => x.visits || 0), units = sum(wf, x => x.units90 || 0);
+  const tr = (D.amz && D.amz.traffic) || {};
+  // ---------- action list ----------
+  const acts = [];
+  const A = (pri, ch, title, body, skus = []) => acts.push({ pri, ch, title, body, skus });
+  if (showAmz) {
+    const byIssue = {}; for (const x of amz) for (const i of x.r.issues) { const k = i[1] + '|' + i[0]; (byIssue[k] = byIssue[k] || { sev: i[0], code: i[1], msg: i[2], attrs: i[3], skus: [] }).skus.push(x.part); }
+    for (const p of m.parents) for (const i of p.issues) { const k = i[1] + '|' + i[0]; (byIssue[k] = byIssue[k] || { sev: i[0], code: i[1], msg: i[2], attrs: i[3], skus: [] }).skus.push(p.sku + ' (parent)'); }
+    for (const g of Object.values(byIssue)) A(g.sev === 'ERROR' ? 1 : 2, 'amz', `Amazon ${g.sev.toLowerCase()} ${g.code} on ${g.skus.length} listing${g.skus.length > 1 ? 's' : ''}`, esc(g.msg) + (/maximum allowed value.*width/i.test(g.msg) ? ' <b>Root cause: the vanities are listed under product type CABINET (max width 42"). Re-list them as BATHROOM_VANITY so dimensions validate and they appear in the right browse node.</b>' : ''), g.skus);
+    const stocked = amzDisc.filter(x => (x.stock || 0) > 0);
+    if (stocked.length) A(1, 'amz', `${stocked.length} Amazon listings are not buyable although CastleGate has stock`, `Status only DISCOVERABLE (no active offer / quantity 0 on Amazon) — customers can see but not buy them. If Amazon is a target channel for these, add quantity on the Multichannel shipping template; check the Multichannel cost per unit on 300-lb vanities first.`, stocked.map(x => x.part));
+    const noAp = amzBuy.filter(x => !x.aplus.length); if (noAp.length) A(2, 'amz', `${noAp.length} buyable ASIN${noAp.length > 1 ? 's' : ''} without A+`, 'A+ typically lifts conversion 3–10% on furniture; publish a module (comparison chart + room shots).', noAp.map(x => x.part));
+    const kwOver = amz.filter(x => x.r.kw > 249); if (kwOver.length) A(2, 'amz', `Search terms over 249 bytes on ${kwOver.length} listing${kwOver.length > 1 ? 's' : ''}`, 'Amazon ignores the whole backend keyword field when it is over 249 bytes — trim it.', kwOver.map(x => x.part));
+    const fewImg = amzBuy.filter(x => x.r.imgs.length < 7); if (fewImg.length) A(2, 'amz', 'Buyable listings with fewer than 7 images', 'Add dimension, lifestyle and detail shots up to 7–9 images.', fewImg.map(x => x.part));
+    A(3, 'amz', 'Videos and Brand Store are not visible through the API', 'Checked weekly in Seller Central (Manage videos, Stores › Insights). A 30–60 s video and a Store page linked from the brand byline are standard for furniture brands.', []);
+  }
+  if (showWf) {
+    const wl = (D.wfListing || {}).listings || {};
+    const reqL = Object.entries(wl).filter(([, l]) => (l.reqMissing || []).length);
+    if (reqL.length) A(1, 'wf', `${reqL.length} Wayfair listings have empty required attributes`, `Empty: ${[...new Set(reqL.flatMap(([, l]) => l.reqMissing))].join(', ')}. Required fields drive filters (depth, glass, power) — a vanity with no depth value drops out of "fits my space" filtering. Fill them in Partner Home › Product Management › Attributes.`, reqL.map(([k]) => k));
+    const aw = Object.entries(wl).filter(([, l]) => l.attrWarn); if (aw.length) A(2, 'wf', `Attribute warnings on ${aw.length} Wayfair listings`, 'Partner Home flags at least one attribute value on each; open Attributes and resolve the yellow warning.', aw.map(([k]) => k));
+    A(1, 'wf', 'No product video on any Wayfair listing', 'Video is one of the strongest conversion levers for large furniture (scale, drawers, soft-close). Upload via Partner Home › Upload Media.', Object.keys(wl));
+    const lowB = Object.entries(wl).filter(([, l]) => l.bullets < 8); if (lowB.length) A(2, 'wf', `${lowB.length} listings with fewer than 8 feature bullets`, 'Wayfair shows up to 10; add material, dimensions, assembly, care and warranty bullets.', lowB.map(([k]) => k));
+    const tc = Object.entries(wl).filter(([, l]) => l.name && !titleCaseOk(l.name)); if (tc.length) A(2, 'wf', 'Product names not in Title Case', tc.map(([, l]) => `"${esc(l.name)}"`).join(' · '), tc.map(([k]) => k));
+    for (const [k, l] of Object.entries(wl)) for (const n of l.notes || []) if (!/Title Case|bullets/.test(n)) A(2, 'wf', `${k}: content mismatch`, esc(n), [k]);
+    const hiT = wf.filter(x => x.visits >= 300 && x.conv != null && x.conv < 0.006); if (hiT.length) A(1, 'wf', 'High traffic, low conversion', `${hiT.map(x => `${x.part} (${n0(x.visits)} visits, ${pct(x.conv, 1)})`).join(', ')} — traffic is there; price, reviews and images are the gap. Get Tried & True reviews and add lifestyle + scale images first.`, hiT.map(x => x.part));
+    const noV = wf.filter(x => x.live && !x.visits && (x.stock || 0) > 0); if (noV.length) A(2, 'wf', `${noV.length} live variants with no visits in 90 days`, 'Wayfair shows the lead variant; these colors/sizes get no traffic of their own. Check variant swatches and consider giving each its own lead image.', noV.map(x => x.part));
+  }
+  if (m.cross.length && S.platform === 'all') A(1, 'all', `${m.cross.length} values differ between Wayfair and Amazon`, [...groupBy(m.cross, c => c.field)].map(([f, L]) => `<b>${esc(f)}</b> on ${L.length} SKUs (e.g. ${esc(L[0].part)}: Amazon "${esc(L[0].amz)}" vs Wayfair "${esc(L[0].wf)}")`).join(' · ') + '. Conflicting specs drive "not as described" returns and damage claims on heavy items — align both listings to the spec sheet. Full list in "Same SKU, different specs" below.', [...new Set(m.cross.map(c => c.part))]);
+  acts.sort((x, y) => x.pri - y.pri);
+  // ---------- SKU matrix (one row per SKU across channels) ----------
+  const parts = [...new Set([...(showWf ? wf.map(x => x.part) : []), ...(showAmz ? amz.map(x => x.part) : [])])];
+  const rows = parts.map(part => { const w = wf.find(x => x.part === part), a = amz.find(x => x.part === part), p = M.P[part] || {};
+    return { part, col: p.col || (a ? 'Amazon' : ''), img: (w && w.img) || (a && a.img), w, a, wScore: w ? w.score : null, aScore: a ? a.score : null, visits: w ? w.visits : null, conv: w ? w.conv : null, rev90: w ? w.rev90 : null, stock: (w || a || {}).stock ?? null,
+      imgsW: w ? w.L.imgs : null, imgsA: a ? a.r.imgs.length : null, issues: (a ? a.r.issues.length : 0) + (w ? (w.L.attrWarn || 0) : 0), req: (a ? a.r.missing.length : 0) + (w ? (w.L.reqMissing || []).length : 0) }; });
+  const chip = (ok, txt) => `<span class="tag ${ok ? 'good' : ok === false ? 'bad' : ''}">${txt}</span>`;
+  const matrix = `<div class="tbl-wrap"><table class="lst"><thead><tr><th></th><th>SKU</th>${showWf ? '<th class="num">Wayfair score</th>' : ''}${showAmz ? '<th class="num">Amazon score</th>' : ''}<th>Channels</th><th class="num">Images</th><th>Video · rich content</th><th class="num">Req. missing</th><th class="num">Issues</th>${showWf ? '<th class="num">Visits 90d</th><th class="num">Conv.</th><th class="num">Wayfair rev. 90d</th>' : ''}<th class="num">Stock</th></tr></thead><tbody>${rows.sort((x, y) => (y.rev90 || 0) - (x.rev90 || 0) || (x.wScore ?? x.aScore ?? 0) - (y.wScore ?? y.aScore ?? 0)).map(r => `<tr>
+    <td>${r.img ? `<img class="lthumb" loading="lazy" src="${esc(r.img)}" alt="">` : '<span class="lthumb ph"></span>'}</td>
+    <td>${skuCell(r.part)}</td>${showWf ? `<td class="num">${r.w ? scoreCell(r.wScore) : '<span class="sub">not on Wayfair</span>'}</td>` : ''}${showAmz ? `<td class="num">${r.a ? scoreCell(r.aScore) : '<span class="sub">not on Amazon</span>'}</td>` : ''}
+    <td>${r.w ? chip(r.w.live, 'Wayfair ' + (r.w.live ? 'live' : esc(r.w.status))) : ''} ${r.a ? chip(r.a.live, 'Amazon ' + (r.a.live ? 'buyable' : 'not buyable')) : ''}</td>
+    <td class="num">${[r.imgsW != null ? 'WF ' + r.imgsW : r.w ? 'WF ?' : '', r.imgsA != null ? 'AMZ ' + r.imgsA : ''].filter(Boolean).join(' · ')}</td>
+    <td>${r.w ? chip(false, 'WF no video') : ''} ${r.a ? chip(r.a.aplus.length > 0, r.a.aplus.length ? 'A+' : 'no A+') : ''}</td>
+    <td class="num">${r.req ? `<b style="color:var(--crit-ink)">${r.req}</b>` : '0'}</td><td class="num">${r.issues ? `<b style="color:var(--crit-ink)">${r.issues}</b>` : '0'}</td>
+    ${showWf ? `<td class="num">${r.visits ? n0(r.visits) : '—'}</td><td class="num">${r.conv != null && r.visits ? pct(r.conv, 1) : '—'}</td><td class="num">${r.rev90 ? usd(r.rev90) : '—'}</td>` : ''}<td class="num">${r.stock != null ? n0(r.stock) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+  // ---------- checklist heatmap ----------
+  const heat = (L, ch) => { if (!L.length) return '<div class="empty">No listings</div>'; const keys = L[0].checks.map(c => c.k);
+    return `<div class="tbl-wrap"><table class="heat chk"><thead><tr><th></th>${L[0].checks.map(c => `<th title="${esc(c.label)}">${esc(c.label.replace(/ \(.*\)$/, ''))}</th>`).join('')}<th class="num">Score</th></tr></thead><tbody>${L.slice().sort((a, b) => (a.score ?? 0) - (b.score ?? 0)).map(x => `<tr><td><b>${esc(x.part)}</b>${ch === 'wf' ? `<small class="sub" style="display:block">${esc(x.listing)}</small>` : ''}</td>${keys.map(k => { const c = x.checks.find(z => z.k === k); const st = c.ok === null ? 'na' : c.ok ? 'ok' : c.pts > 0 ? 'part' : 'bad';
+      return `<td class="ck ${st}" data-tip="${esc(tipRows(x.part + ' · ' + c.label, [['Status', st === 'ok' ? 'Pass' : st === 'part' ? `Partial (${c.pts}/${c.max})` : st === 'na' ? 'Not verifiable via API' : 'Fail'], ['Detail', c.detail]]))}">${st === 'ok' ? '✓' : st === 'part' ? '½' : st === 'na' ? '?' : '✕'}</td>`; }).join('')}<td class="num">${scoreCell(x.score)}</td></tr>`).join('')}</tbody></table></div>`; };
+  // ---------- traffic vs conversion (Wayfair) ----------
+  const quad = (() => { const L = wf.filter(x => x.visits > 0); if (!L.length) return '<div class="empty">No traffic data</div>';
+    const w = CW('half'), h = 300, Lp = 50, R = 14, T = 14, B = 34, C = SER(), xm = Math.max(...L.map(x => x.visits)) * 1.1, ym = Math.max(0.035, ...L.map(x => x.conv || 0)) * 1.15;
+    const X = v => Lp + v / xm * (w - Lp - R), Y = v => T + (1 - v / ym) * (h - T - B), avgC = units / (visits || 1);
+    let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+    for (let i = 0; i <= 4; i++) { const v = ym * i / 4; s += `<line x1="${Lp}" x2="${w - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${Lp - 6}" y="${Y(v) + 4}" text-anchor="end">${pct(v, 1)}</text>`; }
+    for (let i = 0; i <= 4; i++) { const v = xm * i / 4; s += `<text x="${X(v)}" y="${h - B + 16}" text-anchor="middle">${n0(v)}</text>`; }
+    s += `</g><line x1="${Lp}" x2="${w - R}" y1="${Y(avgC)}" y2="${Y(avgC)}" stroke="var(--muted)" stroke-dasharray="4 3"/><text x="${w - R}" y="${Y(avgC) - 5}" text-anchor="end" class="g-axis">avg ${pct(avgC, 1)}</text>`;
+    s += `<text x="${w - R - 4}" y="${T + 12}" text-anchor="end" class="g-axis">Scale: winners</text><text x="${w - R - 4}" y="${h - B - 6}" text-anchor="end" class="g-axis" style="fill:var(--crit-ink)">Fix content / price</text><text x="${Lp + 6}" y="${T + 12}" class="g-axis">Needs traffic (ads)</text>`;
+    for (const x of L) s += `<circle cx="${X(x.visits)}" cy="${Y(x.conv || 0)}" r="${Math.min(16, 5 + Math.sqrt(x.rev90 || 0) / 8)}" fill="${colColor((M.P[x.part] || {}).col)}" fill-opacity=".75" stroke="var(--glass-strong)" stroke-width="2" data-tip="${esc(tipRows(x.part + ' · ' + (x.name || ''), [['Visits (90d)', n0(x.visits)], ['Conversion', pct(x.conv, 1)], ['Units', n0(x.units90)], ['Revenue (90d)', usd(x.rev90)], ['Listing score', String(x.score)]]))}"/><text x="${X(x.visits) + 9}" y="${Y(x.conv || 0) + 4}" class="g-axis">${esc(x.part)}</text>`;
+    return `<div class="chart">${s}<text/></svg></div><p class="note">x = unique visits, y = conversion, bubble = revenue (90 days, Partner Home). Dashed = average conversion.</p>`; })();
+  // ---------- listing detail drawers ----------
+  const det = x => `<details class="ldet" data-ld="${esc(x.ch + x.part)}"${S.open['ld' + x.ch + x.part] ? ' open' : ''}><summary>${x.img ? `<img class="lthumb" loading="lazy" src="${esc(x.img)}" alt="">` : ''}<div><b>${esc(x.part)}</b> <span class="tag ${x.ch === 'amz' ? 'tt' : ''}">${x.ch === 'amz' ? 'Amazon' : 'Wayfair'}</span><small>${esc((x.name || '').slice(0, 110))}</small></div>${scoreCell(x.score)}</summary>
+    <div class="ldet-body">${x.ch === 'amz' && x.gallery.length ? `<div class="gallery">${x.gallery.map(u => `<img loading="lazy" src="${esc(u)}" alt="">`).join('')}</div>` : x.imgL ? `<div class="gallery"><img loading="lazy" src="${esc(x.imgL)}" alt="" style="height:160px"></div>` : ''}
+    <ul class="checks">${x.checks.map(c => `<li class="${c.ok === null ? 'na' : c.ok ? 'ok' : c.pts > 0 ? 'part' : 'bad'}"><span>${c.ok === null ? '?' : c.ok ? '✓' : c.pts > 0 ? '½' : '✕'}</span><b>${esc(c.label)}</b><em>${esc(c.detail)}</em></li>`).join('')}</ul>
+    ${x.ch === 'amz' ? `<p class="note">ASIN ${esc(x.asin)} · product type ${esc(x.pt)} · ${esc(x.status.join(', '))} · price ${x.r.price != null ? usd(x.r.price, 2) : '—'}${x.r.list ? ' (list ' + usd(x.r.list, 2) + ')' : ''} · B2B ${x.r.b2b != null ? usd(x.r.b2b, 2) : '—'} · qty ${x.r.qty ?? 0} · ${x.r.dims ? `${x.r.dims.join(' × ')} in` : 'no dimensions'} · ${x.r.weight ?? '—'} lb${x.r.issues.length ? '<br>' + x.r.issues.map(i => `<b>${esc(i[0])} ${esc(i[1])}</b>: ${esc(i[2])}`).join('<br>') : ''}</p>` : `<p class="note">Listing ${esc(x.listing)} · launched ${dLong(x.launch)} · ${esc(x.L.cls || '')} · assembly: ${esc(x.L.assembly || '—')} · hardware: ${esc(x.L.hw || '—')} · ${x.L.weight ?? '—'} lb · live on ${x.L.stores || 0} stores (wayfair.com / .ca, B2C + B2B)${(x.notes || []).length ? '<br>' + x.notes.map(esc).join('<br>') : ''}</p>`}</div></details>`;
+  const hist = Object.entries(m.hist).sort();
+  return `${pageHead('Listings &amp; Product Management', `Amazon listings via SP-API every 6 h (last ${m.at ? dLong(new Date(m.at * 1000).toISOString()) : '—'}) · Wayfair from Partner Home Product Management, refreshed weekly (last ${dLong(m.wfAt)}) · ${S.platform === 'all' ? 'both channels' : chName(S.platform) + ' only'}`)}
+  <div class="grid g-kpi k3">
+    ${showWf ? kpi('Wayfair listings', `${n0(wfLive.length)}<small> / ${n0(wf.length)} live</small>`, `${n0(new Set(wf.map(x => x.listing)).size)} listings · on wayfair.com + .ca (B2C & B2B)`, 'Variants (part numbers) live on Wayfair.') : ''}
+    ${showAmz ? kpi('Amazon listings', `${n0(amzBuy.length)}<small> / ${n0(amz.length)} buyable</small>`, `${n0(amzDisc.length)} discoverable only · ${n0(m.parents.length)} parent listings`, 'Child + standalone SKUs. Buyable = active offer with quantity.') : ''}
+    ${kpi('Listing quality score', [showWf ? `WF ${avg(wf) ?? '—'}` : '', showAmz ? `AMZ ${avg(amz) ?? '—'}` : ''].filter(Boolean).join(' · '), 'Out of 100 · furniture checklist (content, media, data, reviews)', 'Weighted checklist per channel; items that cannot be verified are left out of the score.')}
+    ${kpi('Portal issues', n0((showAmz ? amzErr + amzWarn : 0) + (showWf ? wfAttrW : 0)), [showAmz ? `Amazon ${amzErr} errors · ${amzWarn} warnings` : '', showWf ? `Wayfair ${wfAttrW} attribute warnings · 0 problems` : ''].filter(Boolean).join(' · '), 'Amazon: Listings API issues (what Seller Central shows as Fix Your Products). Wayfair: Partner Home problems, warnings and attribute warnings.')}
+    ${kpi('Required fields empty', n0((showWf ? wfReq : 0) + (showAmz ? amzReq : 0)), [showWf ? `Wayfair ${wfReq} (across ${Object.values((D.wfListing || {}).listings || {}).filter(l => (l.reqMissing || []).length).length} listings)` : '', showAmz ? `Amazon ${amzReq}` : ''].filter(Boolean).join(' · '), 'Wayfair: attributes marked * with no value. Amazon: required attributes of the product type schema that the listing does not have.')}
+    ${kpi('Rich content', [showAmz ? `A+ ${pct(asinsBuy.size ? [...asinsBuy].filter(a => aplusAsins.has(a)).length / asinsBuy.size : null)}` : '', showWf ? 'WF video 0%' : ''].filter(Boolean).join(' · '), [showAmz ? `${m.aplus.length} A+ documents · ${aplusAsins.size} ASINs covered` : '', showWf ? 'no video on any Wayfair listing' : ''].filter(Boolean).join(' · '), 'Amazon A+ coverage of buyable ASINs (A+ Content API). Wayfair video from Partner Home media.')}
+  </div>
+  ${card('Fix list', 'Every issue the portals report or the checklist finds, most urgent first', acts.length ? `<div class="plan">${acts.map(r => `<div class="plan-row p${r.pri}"><div class="plan-when"><span class="tag ${r.pri === 1 ? 'bad' : r.pri === 2 ? 'warn' : ''}">${r.pri === 1 ? 'Fix now' : r.pri === 2 ? 'Improve' : 'Check'}</span>${r.ch === 'all' ? '<small>Both channels</small>' : `<small>${chName(r.ch)}</small>`}</div><div class="plan-body"><b>${esc(r.title)}</b><p>${r.body}</p>${r.skus.length ? `<div class="plan-skus">${r.skus.slice(0, 16).map(k => `<span>${esc(k)}</span>`).join('')}${r.skus.length > 16 ? `<span>+${r.skus.length - 16}</span>` : ''}</div>` : ''}</div><div class="plan-num"></div></div>`).join('')}</div>` : '<div class="empty">Nothing to fix</div>')}
+  ${card('Listing scorecard', 'One row per SKU across both channels · scores out of 100 · sorted by Wayfair revenue', matrix)}
+  <div class="grid g-2">
+    ${showWf ? card('Traffic vs conversion ' + chOnly('wf'), 'Which listings need content work vs more traffic (Wayfair publishes visits per SKU; Amazon sessions are in Sales › Amazon traffic)', quad) : ''}
+    ${card('Average score by collection', 'Lowest first — where content work pays off most', hbars([...groupBy([...(showWf ? wf : []), ...(showAmz ? amz : [])], x => ((M.P[x.part] || {}).col || 'Other') + ' · ' + (x.ch === 'amz' ? 'Amazon' : 'Wayfair'))].map(([k, L]) => ({ label: k, v: avg(L) || 0, color: SER()[k.includes('Amazon') ? 2 : 0], extra: [['Listings', String(L.length)]] })).sort((a, b) => a.v - b.v), { fmt: v => String(v) }))}
+  </div>
+  ${showWf ? card('Wayfair content checklist ' + chOnly('wf'), 'Each variant against the Wayfair furniture checklist · hover a cell for details · ? = not captured yet', heat(wf, 'wf')) : ''}
+  ${showAmz ? card('Amazon content checklist ' + chOnly('amz'), 'Each SKU against the Amazon furniture checklist (A+ and issues from the API) · ? = not exposed by the API', heat(amz, 'amz')) : ''}
+  ${m.cross.length && S.platform === 'all' ? card('Same SKU, different specs', 'Values that disagree between the Wayfair and Amazon listings', table('lcross', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'field', l: 'Field' }, { k: 'wf', l: 'Wayfair' }, { k: 'amz', l: 'Amazon' }], m.cross)) : ''}
+  ${showAmz && m.aplus.length ? card('Amazon A+ content ' + chOnly('amz'), 'A+ documents and the ASINs they cover', table('laplus', [{ k: 'name', l: 'Document', f: v => `<b>${esc(v)}</b>` }, { k: 'status', l: 'Status', f: v => `<span class="tag ${v === 'APPROVED' ? 'good' : 'warn'}">${esc(v)}</span>` }, { k: 'badges', l: 'Type', f: v => esc((v || []).join(', ').toLowerCase() || 'standard') }, { k: 'n', l: 'ASINs', num: true }, { k: 'updated', l: 'Updated', f: v => dLong(v) }], m.aplus.map(a => ({ ...a, n: a.asins.length })), { def: { k: 'updated', d: 'desc' } })) : ''}
+  ${showAmz ? card('Amazon Brand Store ' + chOnly('amz'), 'Not available through any Amazon API', '<p class="note" style="margin:0">Store pages, Store traffic and Store sales are only in Seller Central › Stores. The weekly check records whether the Store is published, its page count and visits, and flags Store pages that link to unbuyable ASINs.</p>') : ''}
+  <h2 class="sec-title">Listing details</h2>
+  <div class="ldets">${[...(showWf ? wf : []), ...(showAmz ? amz : [])].sort((a, b) => a.part.localeCompare(b.part) || a.ch.localeCompare(b.ch)).map(det).join('')}</div>
+  <p class="note">Scoring: Wayfair — name 10, bullets 15, description 10, images 15, lifestyle images 5, video 10, required attributes 15, attribute warnings 5, portal issues 5, reviews 10. Amazon — title 10, bullets 15, description 5, search terms 5, images 15, video 10 (manual), A+ 10, required attributes 10, issues 10, buyable 5, reviews 5. Unverifiable items are excluded.</p>`;
+}
+
+const VIEWS = { overview: viewOverview, sales: viewSales, profit: viewProfit, customers: viewCustomers, promos: viewPromos, listings: viewListings, ads: viewAds, quality: viewQuality, inventory: viewInventory };
 function render() {
   renderSidebar();
   const y = scrollY; $('#view').innerHTML = VIEWS[S.tab](); if (render.keep) scrollTo(0, y); render.keep = false;
@@ -1363,6 +1524,7 @@ sb.addEventListener('change', e => {
   else if (el.id === 'incTT') { S.incTT = el.checked; rerender(); }
 });
 sb.addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.ms) S.open[d.dataset.ms] = d.open; }, true);
+$('#view').addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.ld) S.open['ld' + d.dataset.ld] = d.open; }, true);
 $('#view').addEventListener('click', e => {
   const th = e.target.closest('th[data-sort]');
   if (th) { const id = th.closest('table').dataset.table, k = th.dataset.sort, cur = S.sort[id] || {}; S.sort[id] = { k, d: cur.k === k && cur.d === 'desc' ? 'asc' : 'desc' }; rerender(); return; }
