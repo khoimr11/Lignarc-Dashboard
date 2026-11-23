@@ -375,3 +375,16 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .install-btn[hidden]{display:none}
 @media (max-width:760px){.install-btn span{display:none}.install-btn{padding:0;width:var(--btn,38px)}}
 .assump-h{margin:18px 0 8px;font-size:14px;font-weight:700}
+.tbl-wrap:has(.pnl-tbl){max-height:none}
+.pnl-tbl tr.strong td{background:var(--glass-thin)}
+.pnl-tbl i.sw{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px;vertical-align:0}
+.audit{display:grid;gap:8px}
+.audit .row{display:grid;grid-template-columns:minmax(150px,1.1fr) 120px 2.4fr;gap:12px;align-items:start;padding:10px 12px;border-radius:12px;background:var(--glass-thin);font-size:13px}
+.audit .row b{font-weight:650}
+.audit .row span.s{justify-self:start}
+.audit .row p{margin:0;color:var(--ink2);line-height:1.45}
+.st-exact{background:rgba(138,164,60,.16)!important;border-color:rgba(138,164,60,.5)!important;color:var(--ink)!important}
+.st-rate{background:rgba(217,154,0,.14)!important;border-color:rgba(217,154,0,.5)!important;color:var(--ink)!important}
+.st-est{background:rgba(201,95,124,.14)!important;border-color:rgba(201,95,124,.45)!important;color:var(--ink)!important}
+.st-na{opacity:.75}
+@media (max-width:760px){.audit .row{grid-template-columns:1fr auto}.audit .row p{grid-column:1/-1}}
