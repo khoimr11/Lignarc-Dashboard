@@ -21,7 +21,7 @@ jobs:
           AMZ_SP_CLIENT_SECRET: ${{ secrets.AMZ_SP_CLIENT_SECRET }}
           AMZ_SP_REFRESH_TOKEN: ${{ secrets.AMZ_SP_REFRESH_TOKEN }}
           LG_DK: ${{ secrets.LG_DK }}
-        run: node scripts/${PROBE_SCRIPT:-promo-probe.mjs} > probe.txt 2>&1 || true
+        run: node scripts/${PROBE_SCRIPT:-listing-probe.mjs} > probe.txt 2>&1 || true
       - name: Encrypt and commit
         env:
           LG_DK: ${{ secrets.LG_DK }}
