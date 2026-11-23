@@ -143,7 +143,7 @@ async function amazonListings(knownAsin) {
   const tok = await lwa(E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET, E.AMZ_SP_REFRESH_TOKEN);
   const H = { 'x-amz-access-token': tok, 'user-agent': 'LignarcDashboard/1.0' }, base = 'https://sellingpartnerapi-na.amazon.com', err = {};
   let seller = E.AMZ_SELLER_ID;
-  if (!seller) { const o = await http(`${base}/products/pricing/v0/items/${knownAsin}/offers?MarketplaceId=${MARKETPLACE}&ItemCondition=New`, { headers: H }); const of = (o.payload && o.payload.Offers) || []; seller = (of.find(x => x.MyOffer) || {}).SellerId; await sleep(1500); }
+  if (!seller) { const o = await http(`${base}/products/pricing/v0/items/${knownAsin}/offers?MarketplaceId=${MARKETPLACE}&ItemCondition=New`, { headers: H }); const of = (o.payload && o.payload.Offers) || []; seller = (of.find(x => x.MyOffer) || of[0] || {}).SellerId; await sleep(1500); }
   if (!seller) throw new Error('seller id not found');
   const items = []; let next = null;
   for (let i = 0; i < 30; i++) {
