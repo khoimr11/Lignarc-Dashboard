@@ -127,7 +127,7 @@ function build() {
   A.amzFeeRate = finOrders.length ? sum(finOrders, o => o.feeBase + o.feeTax - o.feeDisc) / sum(finOrders, o => o.principal + o.ship - o.promo) : A.amazonFee;
   for (const r of (D.amz && D.amz.orders) || []) {
     const qty = +r[5] || 0, price = +r[6] || 0, fo = finBy[r[0]], ts = r[11] || null, hd = ts ? etHourDow(ts) : null;
-    lines.push({ ch: 'amz', po: r[0], date: ts ? vnDay(ts) : r[1], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: '', country: 'US', part: r[3], qty, price, base: price, b2b: false, tt: false,
+    lines.push({ ch: 'amz', po: r[0], date: ts ? vnDay(ts) : r[1], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status: r[2], ok: OK_STATUS(r[2]), retailer: 'Amazon', state: String(r[12] || '').toUpperCase(), country: r[13] || 'US', part: r[3], qty, price, base: price, b2b: r[14] === 'yes', tt: false,
       ship: fo ? fo.ship : (+r[10] || 0), promoAmt: fo ? fo.promo : (+r[9] || 0), fin: fo || null });
   }
   lines.sort((a, b) => (a.ts || a.date + 'T12').localeCompare(b.ts || b.date + 'T12'));
@@ -775,8 +775,8 @@ function amzMoneyCard(f, t) {
 function viewCustomers() {
   const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
   const cur = period(f, t), ps = cur.ps, a = cur.a;
-  const st = {}; for (const x of ps) { const k = x.country === 'CA' ? 'CA-' + x.state : x.state; const s = st[k] = st[k] || { code: x.state, country: x.country, units: 0, rev: 0, net: 0, orders: new Set() }; s.units += x.qty; s.rev += x.rev; s.net += x.net; s.orders.add(x.po); }
-  const rows = Object.entries(st).map(([k, s]) => { const info = s.country === 'CA' ? [CA_PROV[s.code] || s.code, 'Canada', '—'] : (STATES[s.code] || [s.code, '', '']); return { k, code: s.code, name: info[0], region: info[1], coast: info[2], country: s.country, units: s.units, rev: s.rev, net: s.net, orders: s.orders.size, share: a.rev ? s.rev / a.rev : 0 }; });
+  const st = {}; for (const x of ps) { if (!x.state) continue; const k = x.country === 'CA' ? 'CA-' + x.state : x.state; const s = st[k] = st[k] || { code: x.state, country: x.country, units: 0, rev: 0, net: 0, wf: 0, amz: 0, orders: new Set() }; s.units += x.qty; s.rev += x.rev; s.net += x.net; s[x.ch] += x.rev; s.orders.add(x.po); }
+  const rows = Object.entries(st).map(([k, s]) => { const info = s.country === 'CA' ? [CA_PROV[s.code] || s.code, 'Canada', '—'] : (STATES[s.code] || [s.code, '', '']); return { k, code: s.code, name: info[0], region: info[1], coast: info[2], country: s.country, units: s.units, rev: s.rev, net: s.net, wf: s.wf, amz: s.amz, orders: s.orders.size, share: a.rev ? s.rev / a.rev : 0 }; });
   const usStats = {}; for (const r of rows) if (r.country !== 'CA') usStats[r.code] = r;
   const coast = [...groupBy(rows, r => r.country === 'CA' ? 'Canada' : r.coast.replace(' (Gulf)', ''))].map(([k, rs]) => ({ label: k, v: sum(rs, r => r.rev), extra: [['Units', n0(sum(rs, r => r.units))], ['States', n0(rs.length)]] }));
   const region = [...groupBy(rows, r => r.region)].map(([k, rs]) => ({ label: k, v: sum(rs, r => r.rev), sub: n0(sum(rs, r => r.units)) + ' u' })).sort((x, y) => y.v - x.v);
@@ -794,22 +794,55 @@ function viewCustomers() {
     ${kpi('East Coast share', pct(share('East Coast')), 'of revenue')}
     ${kpi('West Coast share', pct(share('West Coast')), 'of revenue')}
     ${kpi('Peak order hour', peakH && peakH[0] ? `${String(peakH[1]).padStart(2, '0')}:00<small>ET</small>` : '—', timed.length ? `${n0(peakH[0])} orders in that hour` : 'needs order timestamps')}
-    ${kpi('B2B orders', n0(ordersOf(b2b)), `${pct(a.rev ? sum(b2b, x => x.rev) / a.rev : null)} of revenue · Wayfair Professional`)}
+    ${kpi('B2B orders', n0(ordersOf(b2b)), `${pct(a.rev ? sum(b2b, x => x.rev) / a.rev : null)} of revenue · Wayfair Professional + Amazon Business`)}
   </div>
   ${card('Where customers buy', 'Revenue by US state — darker = more revenue · hover a state for units and revenue', usMap(usStats))}
   <div class="grid g-21">
     ${card('States ranked', 'Region = US Census region · Coast = Atlantic (East) or Pacific (West) coastline', table('states', [
       { k: 'name', l: 'State', f: (v, r) => `<b>${esc(v)}</b> <span class="sub">${esc(r.code)}</span>` }, { k: 'region', l: 'Region' }, { k: 'coast', l: 'Coast', f: v => v === 'East Coast' || v === 'West Coast' ? `<span class="tag">${esc(v)}</span>` : esc(v) },
-      { k: 'orders', l: 'Orders', num: true }, { k: 'units', l: 'Units', num: true }, { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, { k: 'share', l: 'Share', num: true, f: v => `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(v * 80)}px"></span>` }], rows, { def: { k: 'rev', d: 'desc' } }))}
+      { k: 'orders', l: 'Orders', num: true }, { k: 'units', l: 'Units', num: true }, { k: 'rev', l: 'Revenue', num: true, f: v => usd(v) }, ...(S.platform === 'all' ? [{ k: 'wf', l: 'Wayfair', num: true, f: v => v ? usd(v) : '—' }, { k: 'amz', l: 'Amazon', num: true, f: v => v ? usd(v) : '—' }] : []), { k: 'share', l: 'Share', num: true, f: v => `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(v * 80)}px"></span>` }], rows, { def: { k: 'rev', d: 'desc' } }))}
     <div class="grid">
       ${card('By coast', 'Share of revenue', hbars(coast.sort((x, y) => y.v - x.v).map(c => ({ ...c, sub: pct(a.rev ? c.v / a.rev : 0) })), { fmt: usd }))}
       ${card('By region', '', hbars(region, { fmt: usd }))}
     </div>
   </div>
   <div class="grid g-2">
-    ${card('Orders by hour of day', 'US Eastern time (Wayfair order timestamp)', timed.length ? vbars(hours.map((h, i) => ({ label: String(i), v: ordersOf(h), tip: tipRows(`${String(i).padStart(2, '0')}:00–${String(i).padStart(2, '0')}:59 ET`, [['Orders', n0(ordersOf(h))], ['Units', n0(sum(h, x => x.qty))], ['Revenue', usd(sum(h, x => x.rev))]]) })), { fmt: n0, colors: [C[0]], showVals: true }) + '<p class="note">0 = midnight, 12 = noon, 20 = 8 pm Eastern.</p>' : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
+    ${card('Orders by hour of day', 'US Eastern time · Wayfair and Amazon order timestamps', timed.length ? vbars(hours.map((h, i) => ({ label: String(i), v: ordersOf(h), tip: tipRows(`${String(i).padStart(2, '0')}:00–${String(i).padStart(2, '0')}:59 ET`, [['Orders', n0(ordersOf(h))], ['Units', n0(sum(h, x => x.qty))], ['Revenue', usd(sum(h, x => x.rev))]]) })), { fmt: n0, colors: [C[0]], showVals: true }) + '<p class="note">0 = midnight, 12 = noon, 20 = 8 pm Eastern.</p>' : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
     ${card('Orders by day of week', 'US Eastern time', timed.length ? vbars(dows.map((d, i) => ({ label: DOW[i], v: ordersOf(d), tip: tipRows(DOW[i], [['Orders', n0(ordersOf(d))], ['Units', n0(sum(d, x => x.qty))], ['Revenue', usd(sum(d, x => x.rev))]]) })), { fmt: n0, colors: [C[2]] }) : '<div class="empty">Order timestamps arrive with the next daily sync.</div>')}
+  </div>
+  ${reviewsSection()}
   </div>`;
+}
+
+// Ratings & reviews (Wayfair + Amazon) and Wayfair listing conversion
+function reviewsSection() {
+  const R = D.reviews; if (!R) return '';
+  const C = SER(), plat = S.platform, Ls = Object.values(R.listings || {}).filter(l => (plat === 'all' || l.ch === plat) && (l.parts || []).some(passProd));
+  const items = (R.items || []).filter(r => (plat === 'all' || r.ch === plat) && (!(r.parts || []).length || r.parts.some(passProd)));
+  const rated = Ls.filter(l => l.count > 0), nRev = sum(Ls, l => l.count), avg = nRev ? sum(rated, l => l.rating * l.count) / nRev : null;
+  const ch = v => `<span class="tag ${v === 'amz' ? 'tt' : ''}">${v === 'amz' ? 'Amazon' : 'Wayfair'}</span>`;
+  const stars = n => `<span class="stars" aria-label="${n} out of 5">${'★'.repeat(Math.round(n))}<i>${'★'.repeat(5 - Math.round(n))}</i></span>`;
+  const soldBy = {}; for (const x of M.pieces) if (x.ok && !x.tt) soldBy[x.ch + ':' + x.part] = (soldBy[x.ch + ':' + x.part] || 0) + x.qty;
+  const rows = Ls.map(l => ({ ...l, sold: sum(l.parts || [], p => soldBy[l.ch + ':' + p] || 0) })).map(l => ({ ...l, revRate: l.sold ? l.count / l.sold : null }));
+  const pm = D.wfPm, pmRows = pm && plat !== 'amz' ? pm.rows.filter(r => passProd(r[0])).map(r => ({ part: r[0], rev: r[1], conv: r[2] })) : [];
+  return `<h2 class="sec-title">Ratings &amp; reviews</h2>
+  <div class="grid g-kpi">
+    ${kpi('Average rating', avg != null ? nf1.format(avg) + '<small>/ 5</small>' : '—', `${n0(rated.length)} of ${n0(Ls.length)} listings rated`)}
+    ${kpi('Reviews', n0(nRev), `${n0(items.filter(r => r.incentivized).length)} incentivized (Tried & True / Vine)`, 'Count of published reviews across Wayfair and Amazon listings.')}
+    ${kpi('Review rate', pct(sum(rows, r => r.sold) ? nRev / sum(rows, r => r.sold) : null, 1), 'Reviews ÷ units sold (all time)', 'How many buyers leave a review — a typical rate is 1–3%.')}
+    ${kpi('Low ratings (≤3★)', n0(items.filter(r => r.rating <= 3).length), items.some(r => r.rating <= 3) ? 'Read them below' : 'None so far')}
+  </div>
+  <div class="grid g-21">
+    ${card('Listings', `Checked ${dLong(R.asOf)} · refreshed every Thursday`, table('revlist', [{ k: 'name', l: 'Listing', f: (v, r) => `<div class="sku"><div><b class="trunc" title="${esc(v)}">${esc(v)}</b><small>${esc(r.listing)}</small></div></div>` }, { k: 'ch', l: 'Channel', f: ch },
+      { k: 'rating', l: 'Rating', num: true, f: v => v != null ? `${nf1.format(v)} ${stars(v)}` : '<span class="sub">no reviews</span>' }, { k: 'count', l: 'Reviews', num: true }, { k: 'sold', l: 'Units sold', num: true }, { k: 'revRate', l: 'Review rate', num: true, f: v => pct(v, 1) },
+      { k: 'url', l: '', nosort: true, f: v => v ? `<a href="${esc(v)}" target="_blank" rel="noopener">Open ↗</a>` : '' }], rows, { def: { k: 'sold', d: 'desc' } }))}
+    ${card('What customers wrote', items.length ? '' : 'No written reviews yet', items.length ? `<div class="reviews">${items.sort((x, y) => y.date.localeCompare(x.date)).map(r => `<article class="review">
+        <header>${stars(r.rating)} ${ch(r.ch)} ${r.incentivized ? '<span class="tag tt">Incentivized</span>' : ''}<span class="sub">${dLong(r.date)}${r.state ? ' · ' + esc(r.state) : ''}</span></header>
+        <div class="sub">${esc(((R.listings[r.ch + ':' + r.listing] || {}).name) || r.listing)}${r.variant ? ' · ' + esc(r.variant) : ''}${r.photos ? ` · ${r.photos} photos` : ''}</div>
+        ${r.title ? `<h4>${esc(r.title)}</h4>` : ''}<blockquote>“${esc(r.text)}”</blockquote></article>`).join('')}</div>` : '<div class="empty">Amazon B0HJQQ3MY4 has 0 reviews; Wayfair has 1 so far.</div>')}
+  </div>
+  ${pmRows.length ? card('Wayfair listing conversion', `Partner Home Product Management · ${esc(pm.window)} · checked ${dLong(pm.asOf)}`, table('pmconv', [{ k: 'part', l: 'SKU', f: v => skuCell(v) }, { k: 'rev', l: 'Revenue (90d)', num: true, f: v => v == null ? '—' : usd(v) },
+      { k: 'conv', l: 'Conversion rate', num: true, f: v => v == null ? '—' : `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(Math.min(1, v / 0.035) * 60)}px"></span>` }], pmRows, { def: { k: 'rev', d: 'desc' } })) : ''}`;
 }
 
 function viewAds() {

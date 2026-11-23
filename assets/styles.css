@@ -388,3 +388,10 @@ tfoot td{font-weight:700;border-top:1px solid var(--axis);border-bottom:0;positi
 .st-est{background:rgba(201,95,124,.14)!important;border-color:rgba(201,95,124,.45)!important;color:var(--ink)!important}
 .st-na{opacity:.75}
 @media (max-width:760px){.audit .row{grid-template-columns:1fr auto}.audit .row p{grid-column:1/-1}}
+.stars{color:var(--s2);letter-spacing:1px;font-size:13px}.stars i{color:var(--grid);font-style:normal}
+.reviews{display:grid;gap:12px}
+.review{padding:12px 14px;border-radius:14px;background:var(--glass-thin);display:grid;gap:6px}
+.review header{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.review blockquote{margin:0;font-size:14px;line-height:1.5}
+.review h4{margin:0;font-size:14px}
+.trunc{display:block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
