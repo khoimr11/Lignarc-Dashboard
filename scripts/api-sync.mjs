@@ -260,13 +260,13 @@ async function amazonAds(days) {
   const gz = Buffer.from(await (await fetch(st.url)).arrayBuffer()); const rows = JSON.parse(zlib.gunzipSync(gz).toString());
   const camps = new Map(), byDay = new Map();
   for (const r of rows) {
-    const c = camps.get(r.campaignId) || [String(r.campaignId), r.campaignName, r.campaignStatus, '', '', r.campaignBudgetAmount || 0, 0, 0, 0, 0, 0];
-    c[6] += r.impressions || 0; c[7] += r.clicks || 0; c[8] += r.cost || 0; c[9] += r.sales14d || 0; c[10] += r.purchases14d || 0; camps.set(r.campaignId, c);
+    const c = camps.get(String(r.campaignId)) || [String(r.campaignId), r.campaignName, r.campaignStatus, '', '', r.campaignBudgetAmount || 0, 0, 0, 0, 0, 0];
+    c[6] += r.impressions || 0; c[7] += r.clicks || 0; c[8] += r.cost || 0; c[9] += r.sales14d || 0; c[10] += r.purchases14d || 0; camps.set(String(r.campaignId), c);
     const d = byDay.get(r.date) || [r.date, 0, 0, 0, 0, 0]; d[1] += r.impressions || 0; d[2] += r.clicks || 0; d[3] += r.cost || 0; d[4] += r.sales14d || 0; d[5] += r.purchases14d || 0; byDay.set(r.date, d);
   }
   // campaign delivery status (e.g. payment failure) comes from the campaigns endpoint
   try { const list = await http(base + '/sp/campaigns/list', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.spCampaign.v3+json', Accept: 'application/vnd.spCampaign.v3+json' }, body: JSON.stringify({ includeExtendedDataFields: true }) });
-    for (const x of list.campaigns || []) { const c = camps.get(x.campaignId) || camps.get(+x.campaignId) || [String(x.campaignId), x.name, x.state, '', '', 0, 0, 0, 0, 0, 0]; c[2] = x.state; c[3] = (x.extendedData && (x.extendedData.servingStatus || '')) || ''; c[4] = x.startDate || ''; c[5] = (x.budget && x.budget.budget) || c[5]; camps.set(x.campaignId, c); } } catch (e) { log('campaign list skipped:', e.message); }
+    for (const x of list.campaigns || []) { const c = camps.get(String(x.campaignId)) || [String(x.campaignId), x.name, x.state, '', '', 0, 0, 0, 0, 0, 0]; c[2] = x.state; camps.set(String(x.campaignId), c); c[3] = (x.extendedData && (x.extendedData.servingStatus || '')) || ''; c[4] = x.startDate || ''; c[5] = (x.budget && x.budget.budget) || c[5]; camps.set(x.campaignId, c); } } catch (e) { log('campaign list skipped:', e.message); }
   return { v: 1, src: 'amazon-ads', at: Math.floor(Date.now() / 1000), camps: [...camps.values()], daily: [...byDay.values()] };
 }
 // ---------- Wayfair Developer Portal APIs ----------
