@@ -14,6 +14,7 @@ on:
         default: false
 permissions:
   contents: write
+  actions: write
 concurrency: { group: data-sync, cancel-in-progress: false }
 jobs:
   sync:
@@ -46,3 +47,11 @@ jobs:
           if git diff --cached --quiet -- data/lignarc.enc.json; then MSG="sync state"; else MSG="data: API sync"; fi
           git commit -m "$MSG $(TZ=Asia/Ho_Chi_Minh date '+%Y-%m-%d %H:%M') GMT+7"
           git pull --rebase -q && git push
+      - name: Re-run while Amazon Ads reports are queued
+        # GitHub's 15-minute schedule often fires only every few hours; Amazon reports take 15-60 min.
+        if: ${{ !inputs.probe }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N=$(node -e "const s=require('./data/sync-state.json');process.stdout.write(String((s.adsQ||[]).length))")
+          if [ "$N" != "0" ]; then echo "$N Amazon Ads reports still queued - re-running in 8 min"; sleep 480; gh workflow run api-sync.yml --ref main; fi

@@ -1168,7 +1168,7 @@ function viewAds() {
     { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'util', l: 'Budget used', num: true, f: (v, r) => v == null ? '—' : `${pct(v)}${r.capDays ? `<div class="sub">capped ${r.capDays}/${r.nDays} d</div>` : ''}` },
     { k: 'impr', l: 'Impr.', num: true, f: n0 }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'cvr', l: 'CVR', num: true, f: v => pct(v, 1) },
     { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'acos', l: 'ACoS', num: true, f: (v, r) => `<span style="color:${r.beAcos != null && v > r.beAcos ? 'var(--crit-ink)' : 'inherit'}">${pct(v, 1)}</span>` }, { k: 'roas', l: 'ROAS', num: true, f: v => ratio(v) },
-    { k: 'tos', l: 'Top-of-search IS', num: true, f: v => v == null ? '—' : pct(v, 0) },
+    ...(m.chs.includes('amz') ? [{ k: 'tos', l: 'Top-of-search IS', num: true, f: v => v == null ? '—' : pct(v, 0) }] : []),
     { k: 'act', l: 'Read', nosort: true, f: (v, r) => { const be = r.beAcos; if (!r.spend) return '<span class="tag">No spend</span>'; if (!r.orders) return r.clicks >= (m.thr[r.ch] || 15) ? '<span class="tag bad">Bleeding</span>' : '<span class="tag">Learning</span>'; if (be != null && r.acos > be) return '<span class="tag warn">Above break-even</span>'; if (r.capDays && r.nDays && r.capDays / r.nDays >= 0.3) return '<span class="tag good">Scale: budget-capped</span>'; return '<span class="tag good">Profitable</span>'; } }], campRows, { def: { k: 'spend', d: 'desc' } });
 
   // ---------- Amazon targeting / search terms / placements
