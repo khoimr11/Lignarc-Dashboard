@@ -160,10 +160,13 @@ export default async function wayfair({ gql, http, tok }) {
       if (r.length < 3) continue; const cid = c.id >= 0 ? r[c.id] : (r[c.name] || 'campaign');
       const dt = String(r[c.date]).match(/(\d{4})-(\d{2})-(\d{2})/) ? r[c.date].slice(0, 10) : (() => { const m = String(r[c.date]).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : r[c.date]; })();
       const ci = n => head.indexOf(n);
-      if (!camps.has(cid)) camps.set(cid, [cid, c.name >= 0 ? r[c.name] : cid, ci('campaign_status') >= 0 ? r[ci('campaign_status')] : 1, ci('campaign_start_date') >= 0 ? r[ci('campaign_start_date')] : null, null, ci('campaign_daily_cap_usd') >= 0 ? num(r[ci('campaign_daily_cap_usd')]) : null, null, ci('bidding_strategy') >= 0 ? r[ci('bidding_strategy')] : null]);
-      // the report splits each campaign-day by B2B / targeting type: add the pieces up
-      const k = cid + '|' + dt, row = agg.get(k) || [cid, dt, 0, 0, 0, 0, 0, 0];
-      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += c.units >= 0 ? num(r[c.units]) : 0; row[6] += c.sales >= 0 ? num(r[c.sales]) : 0; row[7] += c.orders >= 0 ? num(r[c.orders]) : 0; agg.set(k, row);
+      if (!camps.has(cid)) camps.set(cid, [cid, c.name >= 0 ? r[c.name] : cid, ci('campaign_status') >= 0 ? r[ci('campaign_status')] : 1, ci('campaign_start_date') >= 0 ? r[ci('campaign_start_date')] : null, null, ci('campaign_daily_cap_usd') >= 0 ? num(r[ci('campaign_daily_cap_usd')]) : null, null, ci('bidding_strategy') >= 0 ? r[ci('bidding_strategy')] : null, ci('targeting_type') >= 0 ? r[ci('targeting_type')] : null, ci('target_roas_percentage') >= 0 ? r[ci('target_roas_percentage')] || null : null, ci('campaign_end_date') >= 0 ? r[ci('campaign_end_date')] : null]);
+      // the report splits each campaign-day by B2B (Wayfair Professional) / targeting type: add the pieces up, keep the B2B part and wholesale-cost sales
+      // [campaignId, date, impr, clicks, spend, units, retail sales, orders, wholesale sales, b2b impr, b2b clicks, b2b spend, b2b retail sales, b2b orders]
+      const k = cid + '|' + dt, row = agg.get(k) || [cid, dt, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ws = ci('attributed_wholesale_cost_window_view_through_usd_day_14'), b2b = ci('isb2b') >= 0 && /true/i.test(r[ci('isb2b')]);
+      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += c.units >= 0 ? num(r[c.units]) : 0; row[6] += c.sales >= 0 ? num(r[c.sales]) : 0; row[7] += c.orders >= 0 ? num(r[c.orders]) : 0; row[8] += ws >= 0 ? num(r[ws]) : 0;
+      if (b2b) { row[9] += num(r[c.impr]); row[10] += num(r[c.clicks]); row[11] += num(r[c.spend]); row[12] += c.sales >= 0 ? num(r[c.sales]) : 0; row[13] += c.orders >= 0 ? num(r[c.orders]) : 0; }
+      agg.set(k, row);
     }
     const daily = [...agg.values()].map(r => r.map((v, i) => i > 1 ? Math.round(v * 100) / 100 : v));
     return { camps: [...camps.values()], daily, wallet: null, columns: head, sample: R.slice(1, 4) };
@@ -179,17 +182,40 @@ export default async function wayfair({ gql, http, tok }) {
     if (!st.url) throw new Error('sku report not ready');
     const R = csv((await (await fetch(st.url)).text()).replace(/^\uFEFF/, '').trim()); const head = R[0].map(h => h.trim().toLowerCase());
     const ix = re => head.findIndex(h => re.test(h));
-    const c = { date: ix(/^date$/), listing: ix(/^listing$/), parts: ix(/part_numbers/), impr: ix(/^impressions$/), clicks: ix(/^clicks$/), spend: ix(/^spend/), sales: ix(/attributed_retail_sales/), orders: ix(/attributed_orders/), units: ix(/attributed_units/) };
+    const c = { date: ix(/^date$/), listing: ix(/^listing$/), parts: ix(/part_numbers/), impr: ix(/^impressions$/), clicks: ix(/^clicks$/), spend: ix(/^spend/), sales: ix(/attributed_retail_sales/), orders: ix(/attributed_orders/), units: ix(/attributed_units/), ws: ix(/attributed_wholesale_cost/), b2b: ix(/^isb2b$/), cid: ix(/^campaign_id$/), bid: ix(/product_default_bid/), st: ix(/^product_status$/), cls: ix(/^class name$/) };
     if (c.date < 0 || c.listing < 0 || c.spend < 0) throw new Error('unexpected sku report columns: ' + head.join('|'));
-    const agg = new Map(), parts = {};
+    const agg = new Map(), parts = {}, byCamp = new Map(), meta = {};
     for (const r of R.slice(1)) {
-      if (r.length < 5) continue; const k = r[c.date] + '|' + r[c.listing];
-      const row = agg.get(k) || [r[c.date], r[c.listing], 0, 0, 0, 0, 0, 0];
-      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += num(r[c.sales]); row[6] += num(r[c.orders]); row[7] += num(r[c.units]); agg.set(k, row);
+      if (r.length < 5) continue; const k = r[c.date] + '|' + r[c.listing], b2b = c.b2b >= 0 && /true/i.test(r[c.b2b]);
+      const row = agg.get(k) || [r[c.date], r[c.listing], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      row[2] += num(r[c.impr]); row[3] += num(r[c.clicks]); row[4] += num(r[c.spend]); row[5] += num(r[c.sales]); row[6] += num(r[c.orders]); row[7] += num(r[c.units]); row[8] += c.ws >= 0 ? num(r[c.ws]) : 0;
+      if (b2b) { row[9] += num(r[c.clicks]); row[10] += num(r[c.spend]); row[11] += num(r[c.sales]); row[12] += num(r[c.orders]); }
+      agg.set(k, row);
+      // listing × campaign (summed over days) so the dashboard can show which campaign carries which listing
+      if (c.cid >= 0) { const kc = r[c.date] + '|' + r[c.listing] + '|' + r[c.cid], x = byCamp.get(kc) || [r[c.date], r[c.listing], r[c.cid], 0, 0, 0, 0, 0]; x[3] += num(r[c.impr]); x[4] += num(r[c.clicks]); x[5] += num(r[c.spend]); x[6] += num(r[c.sales]); x[7] += num(r[c.orders]); byCamp.set(kc, x); }
       if (c.parts >= 0) parts[r[c.listing]] = String(r[c.parts]).split(/,\s*/).filter(Boolean);
+      if (c.bid >= 0) meta[r[c.listing] + '|' + (c.cid >= 0 ? r[c.cid] : '')] = [r[c.listing], c.cid >= 0 ? r[c.cid] : '', num(r[c.bid]), c.st >= 0 ? r[c.st] : '', c.cls >= 0 ? r[c.cls] : '', r[c.date]];
     }
-    // [date, listing, impressions, clicks, spend, attributed retail sales, orders, units]
-    return { daily: [...agg.values()].map(r => r.map((v, i) => i > 1 ? Math.round(v * 100) / 100 : v)), parts };
+    const rnd = r => r.map((v, i) => typeof v === 'number' ? Math.round(v * 100) / 100 : v);
+    // daily: [date, listing, impressions, clicks, spend, retail sales, orders, units, wholesale sales, b2b clicks, b2b spend, b2b sales, b2b orders]
+    // byCamp: [date, listing, campaignId, impressions, clicks, spend, retail sales, orders] · bids: latest default bid per listing × campaign
+    const bids = {}; for (const m of Object.values(meta)) { const k = m[0] + '|' + m[1]; if (!bids[k] || bids[k][5] < m[5]) bids[k] = m; }
+    return { daily: [...agg.values()].map(rnd), byCamp: [...byCamp.values()].map(rnd), bids: Object.values(bids).map(m => m.slice(0, 5)), parts };
+  });
+
+  // 6) Organic class rank per listing per day (PRODUCT_RANK_REPORT): shows whether ad spend lifts the listing's rank in its Wayfair class
+  await step('adsRank', async () => {
+    const H = { Authorization: 'Bearer ' + tok, 'content-type': 'application/json' };
+    const end = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+    const rep = await http(ADS_API + '/reports', { method: 'POST', headers: H, body: JSON.stringify({ name: 'lignarc-rank-' + end, reportType: 'PRODUCT_RANK_REPORT', groupBy: 'DAY', program: 'WSP', fileType: 'CSV', filters: { startDate: ADS_FROM, endDate: end }, attributionWindow: 14, supplierId: SUPPLIER_ID }) });
+    const id = rep.id || rep.reportId; let st = {};
+    for (let i = 0; i < 60; i++) { await sleep(10000); st = await http(ADS_API + '/reports?reportId=' + encodeURIComponent(id), { headers: H }); if (st.status === 'COMPLETED' && st.url) break; if (/FAIL/i.test(st.status || '')) throw new Error('rank report ' + st.status); }
+    if (!st.url) throw new Error('rank report not ready');
+    const R = csv((await (await fetch(st.url)).text()).replace(/^\uFEFF/, '').trim()); const head = R[0].map(h => h.trim().toLowerCase());
+    const ix = n => head.indexOf(n), c = { date: ix('date'), listing: ix('listing'), st: ix('campaign listing status'), cls: ix('class name'), rank: ix('class rank') };
+    if (c.date < 0 || c.rank < 0) throw new Error('unexpected rank report columns: ' + head.join('|'));
+    // [date, listing, class, rank, status]
+    return R.slice(1).filter(r => r.length > 3).map(r => [r[c.date], r[c.listing], r[c.cls], num(r[c.rank]) || null, r[c.st]]);
   });
 
   if (Object.keys(err).length) out.err = err;

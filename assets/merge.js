@@ -19,7 +19,11 @@
       if (p.sale && p.sale.length) { W.sale = mergeBy(W.sale, p.sale, r => r[0] + '|' + r[1]); res.sale = W.sale.length; }
       if (p.ads) { W.ads = W.ads || {}; if (p.ads.camps && p.ads.camps.length) W.ads.camps = p.ads.camps; if (p.ads.wallet) W.ads.wallet = p.ads.wallet; if (p.ads.columns) W.ads.columns = p.ads.columns; if (p.ads.sample) W.ads.sample = p.ads.sample;
         W.ads.daily = mergeBy(W.ads.daily, p.ads.daily, r => r[0] + '|' + r[1]).sort((a, b) => a[1].localeCompare(b[1])); res.adsDays = W.ads.daily.length; }
-      if (p.adsSku && p.adsSku.daily) { W.adsSku = mergeBy(W.adsSku, p.adsSku.daily, r => r[0] + '|' + r[1]).sort((a, b) => a[0].localeCompare(b[0])); W.adsParts = Object.assign(W.adsParts || {}, p.adsSku.parts || {}); res.adsSku = W.adsSku.length; }
+      if (p.adsSku && p.adsSku.daily) { W.adsSku = mergeBy(W.adsSku, p.adsSku.daily, r => r[0] + '|' + r[1]).sort((a, b) => a[0].localeCompare(b[0])); W.adsParts = Object.assign(W.adsParts || {}, p.adsSku.parts || {}); res.adsSku = W.adsSku.length;
+        if (p.adsSku.byCamp) W.adsSkuCamp = mergeBy(W.adsSkuCamp, p.adsSku.byCamp, r => r[0] + '|' + r[1] + '|' + r[2]).sort((a, b) => a[0].localeCompare(b[0]));
+        if (p.adsSku.bids) W.adsBids = p.adsSku.bids; }
+      if (p.adsKw && p.adsKw.length) { W.adsKw = mergeBy(W.adsKw, p.adsKw, r => r.slice(0, 5).join('|')).sort((a, b) => a[0].localeCompare(b[0])); res.adsKw = W.adsKw.length; }
+      if (p.adsRank && p.adsRank.length) { W.adsRank = mergeBy(W.adsRank, p.adsRank, r => r.slice(0, 3).join('|')).sort((a, b) => a[0].localeCompare(b[0])); res.adsRank = W.adsRank.length; }
       data.meta.wfAt = p.at; data.meta.wfErr = p.err || null;
     } else if (p.src === 'amazon-orders') {
       data.amz.orders = mergeBy(data.amz.orders, p.orders, r => r[0] + '|' + r[3]).sort((a, b) => (b[1] || '').localeCompare(a[1] || '')); res.orders = data.amz.orders.length; data.meta.amzOrdersAt = p.at;
@@ -51,7 +55,24 @@
       // deferred transactions get re-posted as released with the same id: latest copy wins
       data.amz.fin = mergeBy(data.amz.fin, p.rows, r => r[0]).sort((a, b) => (a[1] || '').localeCompare(b[1] || '')); res.fin = data.amz.fin.length; data.meta.amzFinAt = p.at;
     } else if (p.src === 'amazon-ads') {
-      const A = data.amz.ads = data.amz.ads || {}; if (p.camps) A.camps = p.camps; A.daily = mergeBy(A.daily, p.daily, r => r[0]).sort((a, b) => a[0].localeCompare(b[0])); res.days = A.daily.length; data.meta.amzAdsAt = p.at;
+      const A = data.amz.ads = data.amz.ads || {};
+      if (p.v >= 2) {
+        // v2: entity snapshot + daily report rows per type; a report window replaces every row of that type inside the window
+        if (p.ent) { A.ent = p.ent; res.ent = 1; }
+        for (const w of p.rep || []) { const k = w.k;
+          if (k === 'pp') { if (!A.ppWin || w.e >= A.ppWin[1]) { A.pp = w.rows; A.ppWin = [w.s, w.e]; } res.pp = (A.pp || []).length; continue; }
+          const keep = (A[k] || []).filter(r => r[0] < w.s || r[0] > w.e);
+          const cut = new Date(Date.now() - 400 * 864e5).toISOString().slice(0, 10);
+          A[k] = keep.concat(w.rows).filter(r => r[0] >= cut).sort((a, b) => a[0].localeCompare(b[0])); res[k] = A[k].length;
+        }
+        // keep the legacy aggregates the rest of the dashboard reads
+        if (A.cd && A.cd.length) {
+          const by = new Map(); for (const r of A.cd) { const d = by.get(r[0]) || [r[0], 0, 0, 0, 0, 0]; d[1] += r[2]; d[2] += r[3]; d[3] += r[4]; d[4] += r[5]; d[5] += r[6]; by.set(r[0], d); }
+          A.daily = [...by.values()].map(d => d.map((v, i) => i > 2 ? Math.round(v * 100) / 100 : v)).sort((a, b) => a[0].localeCompare(b[0]));
+        }
+        if (A.ent && A.ent.camps) A.camps = A.ent.camps.map(c => [c.id, c.name, c.state, c.serving, c.start, c.budget, 0, 0, 0, 0, 0]);
+        data.meta.amzAdsAt = p.at;
+      } else { if (p.camps) A.camps = p.camps; A.daily = mergeBy(A.daily, p.daily, r => r[0]).sort((a, b) => a[0].localeCompare(b[0])); res.days = A.daily.length; data.meta.amzAdsAt = p.at; }
     } else throw new Error('unknown payload ' + p.src);
     data.meta.at = Math.floor(Date.now() / 1000); data.meta.today = etToday();
     return res;
