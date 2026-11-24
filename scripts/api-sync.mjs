@@ -246,10 +246,12 @@ async function amazonAds(days) {
     delete P.adsReport;
   } else {
     const end = new Date(Date.now() - 864e5), start = new Date(end - (days - 1) * 864e5);
-    const rep = await http(base + '/reporting/reports', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' }, body: JSON.stringify({
+    const rep = await (async () => { try { return await http(base + '/reporting/reports', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' }, body: JSON.stringify({
       name: 'lignarc-sp-daily-' + day(end) + '-' + Date.now(), startDate: day(start), endDate: day(end),
       configuration: { adProduct: 'SPONSORED_PRODUCTS', groupBy: ['campaign'], reportTypeId: 'spCampaigns', timeUnit: 'DAILY', format: 'GZIP_JSON',
-        columns: ['date', 'campaignId', 'campaignName', 'campaignStatus', 'campaignBudgetAmount', 'impressions', 'clicks', 'cost', 'sales14d', 'purchases14d', 'unitsSoldClicks14d'] } }) });
+        columns: ['date', 'campaignId', 'campaignName', 'campaignStatus', 'campaignBudgetAmount', 'impressions', 'clicks', 'cost', 'sales14d', 'purchases14d', 'unitsSoldClicks14d'] } }) }); }
+      // Amazon answers 425 when the same report was already requested — reuse that report id
+      catch (e) { const m = /duplicate of\s*:\s*([0-9a-f-]{36})/i.exec(e.message); if (m) return { reportId: m[1] }; throw e; } })();
     P.adsReport = { id: rep.reportId, at: Date.now() };
     for (let i = 0; i < 16; i++) { await sleep(15000); st = await http(base + '/reporting/reports/' + rep.reportId, { headers: HS }); if (st.status === 'COMPLETED' || st.status === 'FAILED') break; }
     if (!st || st.status !== 'COMPLETED') return { pending: true, status: st && st.status };
