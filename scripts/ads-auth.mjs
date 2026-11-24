@@ -6,6 +6,8 @@ const E = process.env, K = Buffer.from(E.LG_DK, 'base64');
 const dec = f => { const j = JSON.parse(fs.readFileSync(f, 'utf8')), ct = Buffer.from(j.ct, 'base64'), d = createDecipheriv('aes-256-gcm', K, Buffer.from(j.iv, 'base64')); d.setAuthTag(ct.subarray(-16)); return JSON.parse(Buffer.concat([d.update(ct.subarray(0, -16)), d.final()]).toString()); };
 const enc = o => { const iv = randomBytes(12), c = createCipheriv('aes-256-gcm', K, iv); return JSON.stringify({ iv: iv.toString('base64'), ct: Buffer.concat([c.update(JSON.stringify(o)), c.final(), c.getAuthTag()]).toString('base64') }); };
 const { code, redirect } = dec('data/ads-code.enc.json');
+// credentials stored (encrypted) in the repo take priority over GitHub secrets
+if (fs.existsSync('data/cred.enc.json')) { const c0 = dec('data/cred.enc.json'); for (const k of ['AMZ_ADS_CLIENT_ID', 'AMZ_ADS_CLIENT_SECRET']) if (c0[k]) E[k] = c0[k]; }
 const pairs = [['ads', E.AMZ_ADS_CLIENT_ID, E.AMZ_ADS_CLIENT_SECRET], ['sp', E.AMZ_SP_CLIENT_ID, E.AMZ_SP_CLIENT_SECRET]].filter(p => p[1] && p[2]);
 let ok = null;
 for (const [name, id, secret] of pairs) {
