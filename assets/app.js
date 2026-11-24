@@ -404,12 +404,12 @@ function hbars(items, { fmt = n0, color } = {}) {
   return `<div class="hbar">${items.map((it, i) => `<div class="row" data-tip="${esc(it.tip || tipRows(it.label, [['Value', fmt(it.v)], ...(it.extra || [])]))}"><span>${esc(it.label)}</span><div class="tr"><i style="width:${Math.max(1.5, Math.abs(it.v) / max * 100)}%;background:${it.v < 0 ? cssv('--crit') : (it.color || color || C[0])}"></i></div><b>${esc(fmt(it.v))}${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</b></div>`).join('')}</div>`;
 }
 // HTML heatmap: rows × cols, cell shade by value (single-hue ramp), value printed in the cell
-function heatmap(rowKeys, colKeys, cell, { fmt = n0, rowLabel = k => k, colLabel = k => k, tip, color = 1 } = {}) {
+function heatmap(rowKeys, colKeys, cell, { fmt = n0, rowLabel = k => k, colLabel = k => k, tip, color = 1, total, totLabel = 'Total' } = {}) {
   const vals = rowKeys.flatMap(r => colKeys.map(c => cell(r, c) || 0)), mx = Math.max(0, ...vals);
   if (!mx) return '<div class="empty">No data in this period</div>';
   const C = SER(), base = C[color];
   const td = (r, c) => { const v = cell(r, c) || 0, a = v ? 0.12 + 0.78 * v / mx : 0; return `<td class="hm" style="background:${v ? `color-mix(in srgb, ${base} ${Math.round(a * 100)}%, transparent)` : 'transparent'};color:${a > 0.55 ? '#fff' : 'var(--ink)'}" data-tip="${esc(tip ? tip(r, c, v) : tipRows(rowLabel(r) + ' · ' + colLabel(c), [['Value', fmt(v)]]))}">${v ? fmt(v) : '<span class="sub">·</span>'}</td>`; };
-  return `<div class="tbl-wrap"><table class="heat"><thead><tr><th></th>${colKeys.map(c => `<th class="num">${esc(colLabel(c))}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>${rowKeys.map(r => `<tr><td><b>${esc(rowLabel(r))}</b></td>${colKeys.map(c => td(r, c)).join('')}<td class="num"><b>${fmt(sum(colKeys, c => cell(r, c) || 0))}</b></td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="tbl-wrap"><table class="heat"><thead><tr><th></th>${colKeys.map(c => `<th class="num">${esc(colLabel(c))}</th>`).join('')}<th class="num">${esc(totLabel)}</th></tr></thead><tbody>${rowKeys.map(r => `<tr><td><b>${esc(rowLabel(r))}</b></td>${colKeys.map(c => td(r, c)).join('')}<td class="num"><b>${total ? total(r) : fmt(sum(colKeys, c => cell(r, c) || 0))}</b></td></tr>`).join('')}</tbody></table></div>`;
 }
 // 100% stacked horizontal bars: one row per group, segments per category
 function stack100(groups, cats, val, { colorOf, fmt = n0 } = {}) {
@@ -921,39 +921,309 @@ function reviewsSection() {
       { k: 'conv', l: 'Conversion rate', num: true, f: v => v == null ? '—' : `${pct(v, 1)}<span class="mini-bar" style="width:${Math.round(Math.min(1, v / 0.035) * 60)}px"></span>` }], pmRows, { def: { k: 'rev', d: 'desc' } })) : ''}`;
 }
 
+// ================= Advertising: performance model (both channels) =================
+// Amazon: Ads API v3 reports (campaign, placement, targeting, search term, advertised product) + entity snapshot.
+// Wayfair: Advertising API campaign / listing / class-rank reports. Wayfair has no keyword or search-term report for WSP.
+const AD0 = () => ({ impr: 0, clicks: 0, spend: 0, sales: 0, orders: 0, units: 0 });
+const adAdd = (o, impr, clicks, spend, sales, orders, units) => { o.impr += +impr || 0; o.clicks += +clicks || 0; o.spend += +spend || 0; o.sales += +sales || 0; o.orders += +orders || 0; o.units += +units || 0; return o; };
+const adR = o => Object.assign(o, { ctr: o.impr ? o.clicks / o.impr : null, cpc: o.clicks ? o.spend / o.clicks : null, cvr: o.clicks ? o.orders / o.clicks : null, cpa: o.orders ? o.spend / o.orders : null, roas: o.spend ? o.sales / o.spend : null, acos: o.sales ? o.spend / o.sales : null, aov: o.orders ? o.sales / o.orders : null });
+const DOWS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dowOf = d => new Date(d + 'T12:00:00Z').getUTCDay();
+const PLC = { 'Top of Search on-Amazon': 'Top of search', 'Detail Page on-Amazon': 'Product pages', 'Other on-Amazon': 'Rest of search', 'Off Amazon': 'Off Amazon', 'Amazon Business': 'Amazon Business' };
+const isAsin = s => /^b0[a-z0-9]{8}$/i.test(String(s).trim());
+const tgtLabel = s => String(s || '').replace(/^asin="?([^"]+)"?$/i, 'ASIN $1').replace(/^asin-expanded="?([^"]+)"?$/i, 'ASIN+ $1').replace(/^category="?([^"]+)"?.*$/i, 'Category $1');
+function adsModel(f, t) {
+  const chs = S.platform === 'all' ? ['wf', 'amz'] : [S.platform], A = (D.amz && D.amz.ads) || {}, W = D.wf || {};
+  const inR = d => d >= f && d <= t, pm = promoModel(), out = { chs, f, t, ch: {}, camps: [], tg: [], st: [], pl: new Map(), prod: [], dow: { wf: DOWS.map(AD0), amz: DOWS.map(AD0) }, daily: new Map(), b2b: { pro: AD0(), con: AD0() }, ws: 0, notes: [] };
+  for (const ch of chs) out.ch[ch] = AD0();
+  const day = (d, ch) => { const x = out.daily.get(d) || { wf: AD0(), amz: AD0() }; out.daily.set(d, x); return x[ch]; };
+  // ---- break-even: contribution per unit before ads (FIFO landed cost, platform fees) ÷ the price the channel reports ad sales at
+  const be = {}; // part -> {ch, contrib, price, acos}
+  const econOf = (ch, part) => { const e = pm.econ(ch, part); if (!e) return null; const c = e.at(0), price = ch === 'wf' ? (e.retail || e.list * 2) : e.list; return { contrib: c, price, acos: price ? Math.max(0, c) / price : null, wsAcos: ch === 'wf' && e.list ? Math.max(0, c) / e.list : null, list: e.list }; };
+  // ---- Wayfair
+  if (chs.includes('wf')) {
+    const meta = new Map(((W.ads && W.ads.camps) || []).map(c => [c[0], c])), cm = new Map(), capDays = {};
+    for (const r of (W.ads && W.ads.daily) || []) { if (!inR(r[1])) continue;
+      const c = cm.get(r[0]) || { ch: 'wf', id: r[0], ...AD0(), days: new Set(), ws: 0 }; adAdd(c, r[2], r[3], r[4], r[6], r[7], r[5]); c.ws += r[8] || 0; c.days.add(r[1]); cm.set(r[0], c);
+      adAdd(out.ch.wf, r[2], r[3], r[4], r[6], r[7], r[5]); adAdd(day(r[1], 'wf'), r[2], r[3], r[4], r[6], r[7], r[5]); adAdd(out.dow.wf[dowOf(r[1])], r[2], r[3], r[4], r[6], r[7], r[5]); out.ws += r[8] || 0;
+      if (r.length > 9) { adAdd(out.b2b.pro, r[9], r[10], r[11], r[12], r[13], 0); adAdd(out.b2b.con, r[2] - r[9], r[3] - r[10], r[4] - r[11], r[6] - r[12], r[7] - r[13], 0); out.b2bOk = true; }
+      const m = meta.get(r[0]) || []; if (m[5] && r[4] >= m[5] * 0.95) capDays[r[0]] = (capDays[r[0]] || 0) + 1; }
+    for (const c of cm.values()) { const m = meta.get(c.id) || []; out.camps.push(adR({ ...c, name: m[1] || c.id, state: m[2], start: m[3], budget: m[5], type: m[8] || (/key/i.test(m[1]) ? 'Keyword Targeting' : 'Product Targeting'), strategy: m[7], nDays: c.days.size, capDays: capDays[c.id] || 0, util: m[5] && c.days.size ? c.spend / c.days.size / m[5] : null })); }
+    // listings (Wayfair SKU report) — filtered by product filters through their child SKUs
+    const L = new Map(), rank = new Map(), bids = new Map();
+    for (const r of W.adsRank || []) { const x = rank.get(r[1]) || []; x.push(r); rank.set(r[1], x); }
+    for (const b of W.adsBids || []) { const x = bids.get(b[0]) || []; x.push(b); bids.set(b[0], x); }
+    for (const r of W.adsSku || []) { if (!inR(r[0])) continue; const kids = M.listingParts[r[1]] || []; if (kids.length && !kids.some(passProd)) continue;
+      const x = L.get(r[1]) || { ch: 'wf', id: r[1], ...AD0(), ws: 0 }; adAdd(x, r[2], r[3], r[4], r[5], r[6], r[7]); x.ws += r[8] || 0; L.set(r[1], x); }
+    const cp = chanPeriod('wf', f, t), sold = groupBy(cp.all.filter(x => !x.tt), x => x.part);
+    for (const x of L.values()) { const kids = M.listingParts[x.id] || [], P = M.P[kids[0]] || {};
+      const g = agg(kids.flatMap(k => sold.get(k) || [])), ec = kids.map(k => econOf('wf', k)).filter(Boolean);
+      const stock = sum(kids, k => (pm.inv[k] || {}).onHand || 0), v30 = sum(kids, k => pm.v30[k] || 0), rk = (rank.get(x.id) || []).filter(r => r[3]).sort((a, b) => a[0].localeCompare(b[0]));
+      const rkIn = rk.filter(r => inR(r[0])), r0 = rkIn[0], r1 = rkIn[rkIn.length - 1];
+      out.prod.push(adR({ ...x, name: (P.name || x.id).replace(/ with .*/i, ''), kids, col: P.col, units: g.units, rev: g.rev, gp: g.gp, adShare: g.units ? Math.min(1, x.orders / g.units) : null, tacos: g.rev ? x.spend / g.rev : null, profit: g.gp - x.spend,
+        be: ec.length ? sum(ec, e => e.acos) / ec.length : null, wsBe: ec.length && sum(ec, e => e.contrib) > 0 ? sum(ec, e => e.list) / sum(ec, e => Math.max(0.01, e.contrib)) : null, beCpa: ec.length ? sum(ec, e => e.contrib) / ec.length : null, wsRoas: x.spend ? x.ws / x.spend : null, stock, cover: v30 ? stock / (v30 / 30) : (stock ? Infinity : 0),
+        rank: r1 ? r1[3] : null, rank0: r0 ? r0[3] : null, cls: r1 ? r1[2] : null, rankSeries: rkIn.map(r => r[3]), bid: (bids.get(x.id) || []).map(b => b[2]).filter(Boolean), active: (bids.get(x.id) || []).some(b => /active/i.test(b[3])) })); }
+    // listings never advertised but in stock
+    out.wfIdle = Object.keys(M.listingParts).filter(lid => /^LGFA/.test(lid) && !L.has(lid) && (M.listingParts[lid] || []).some(passProd) && sum(M.listingParts[lid], k => (pm.inv[k] || {}).onHand || 0) > 0);
+    out.lxc = []; for (const r of W.adsSkuCamp || []) if (inR(r[0])) out.lxc.push(r);
+  }
+  // ---- Amazon
+  if (chs.includes('amz') && passProd('5C8N')) {
+    const ent = A.ent || {}, meta = new Map((ent.camps || []).map(c => [c.id, c])), cm = new Map();
+    if ((A.cd || []).length) {
+      for (const r of A.cd) { if (!inR(r[0])) continue; const c = cm.get(r[1]) || { ch: 'amz', id: r[1], ...AD0(), days: new Set(), tosW: 0, tosI: 0, same: 0, capD: 0 };
+        adAdd(c, r[2], r[3], r[4], r[5], r[6], r[7]); c.same += r[8] || 0; if (r[9] != null) { c.tosW += r[9] * r[2]; c.tosI += r[2]; } c.days.add(r[0]); const m = meta.get(r[1]); if (m && m.budget && r[4] >= m.budget * 0.95) c.capD++; cm.set(r[1], c);
+        adAdd(out.ch.amz, r[2], r[3], r[4], r[5], r[6], r[7]); adAdd(day(r[0], 'amz'), r[2], r[3], r[4], r[5], r[6], r[7]); adAdd(out.dow.amz[dowOf(r[0])], r[2], r[3], r[4], r[5], r[6], r[7]); }
+    } else {
+      // first sync before the detailed reports: totals only
+      for (const r of A.daily || []) { if (!inR(r[0])) continue; adAdd(out.ch.amz, r[1], r[2], r[3], r[4], r[5], 0); adAdd(day(r[0], 'amz'), r[1], r[2], r[3], r[4], r[5], 0); adAdd(out.dow.amz[dowOf(r[0])], r[1], r[2], r[3], r[4], r[5], 0); }
+      for (const c of [...new Map((A.camps || []).map(c => [String(c[0]), c])).values()]) cm.set(String(c[0]), { ch: 'amz', id: String(c[0]), ...adAdd(AD0(), c[6], c[7], c[8], c[9], c[10], c[10]), days: new Set(), tosW: 0, tosI: 0, capD: 0, legacy: true, lname: c[1], lstate: c[2], lserv: c[3], lstart: c[4], lbudget: c[5] });
+      out.notes.push('Amazon keyword, search-term, placement and product reports arrive with the next Ads sync.');
+    }
+    const usage = ent.usage || {}, brec = ent.budgetRec || {};
+    for (const c of cm.values()) { const m = meta.get(c.id) || { name: c.lname, state: c.lstate, serving: c.lserv, start: c.lstart, budget: c.lbudget, targeting: /\bAUTO\b/.test(c.lname || '') ? 'AUTO' : 'MANUAL' }; out.camps.push(adR({ ...c, name: m.name || c.id, state: m.state, serving: m.serving, start: m.start, budget: m.budget, type: m.targeting === 'AUTO' ? 'Auto' : 'Manual', strategy: m.strategy, top: m.top, ppAdj: m.pp, nDays: c.days.size, capDays: c.capD, util: m.budget && c.days.size ? c.spend / c.days.size / m.budget : null, tos: c.tosI ? c.tosW / c.tosI : null, usage: (usage[c.id] || [])[0], rec: brec[c.id] })); }
+    for (const m of ent.camps || []) if (!cm.has(m.id) && m.state === 'ENABLED') out.camps.push(adR({ ch: 'amz', id: m.id, ...AD0(), name: m.name, state: m.state, serving: m.serving, start: m.start, budget: m.budget, type: m.targeting === 'AUTO' ? 'Auto' : 'Manual', nDays: 0, capDays: 0, usage: (usage[m.id] || [])[0], rec: brec[m.id] }));
+    const cname = id => (meta.get(id) || {}).name || id;
+    // placements
+    for (const r of A.pl || []) { if (!inR(r[0])) continue; const k = PLC[r[2]] || r[2], x = out.pl.get(k) || AD0(); adAdd(x, r[3], r[4], r[5], r[6], r[7], r[8]); out.pl.set(k, x); }
+    // targets (keywords, ASIN / category targets, auto groups)
+    const kwE = new Map((ent.kws || []).map(k => [k[0], k])), tgE = new Map((ent.tgts || []).map(k => [k[0], k])), br = ent.bidRec || {}, TG = new Map();
+    for (const r of A.tg || []) { if (!inR(r[0])) continue; const k = r[1] + '|' + r[3], x = TG.get(k) || { ch: 'amz', id: r[3], cid: r[1], camp: cname(r[1]), text: r[4], match: r[5], kt: r[6], ...AD0(), tosW: 0, tosI: 0, rbid: null, last: '' };
+      adAdd(x, r[7], r[8], r[9], r[10], r[11], r[12]); if (r[13] != null) { x.tosW += r[13] * r[7]; x.tosI += r[7]; } if (r[0] >= x.last && r[14] != null) { x.rbid = r[14]; x.last = r[0]; } TG.set(k, x); }
+    for (const x of TG.values()) { const e = kwE.get(x.id) || tgE.get(x.id); out.tg.push(adR({ ...x, label: x.kt === 'TARGETING_EXPRESSION' || x.kt === 'TARGETING_EXPRESSION_PREDEFINED' ? tgtLabel(x.text) : x.text, kind: kwE.has(x.id) ? 'Keyword' : x.kt === 'TARGETING_EXPRESSION_PREDEFINED' ? 'Auto group' : 'Product target', state: e ? (kwE.has(x.id) ? e[5] : e[4]) : '', bid: e ? (kwE.has(x.id) ? e[6] : e[5]) : x.rbid, rec: br[x.id] || null, tos: x.tosI ? x.tosW / x.tosI : null })); }
+    // search terms
+    const exact = new Set((ent.kws || []).filter(k => k[4] === 'EXACT' && k[5] === 'ENABLED').map(k => k[3].toLowerCase()));
+    const negs = new Set((ent.neg || []).map(n => n[2])), ST = new Map();
+    for (const r of A.st || []) { if (!inR(r[0])) continue; const x = ST.get(r[6]) || { ch: 'amz', term: r[6], ...AD0(), src: new Map() }; adAdd(x, r[7], r[8], r[9], r[10], r[11], r[12]); const sk = cname(r[1]) + ' › ' + (r[5] === 'TARGETING_EXPRESSION_PREDEFINED' ? r[4] : (r[5] || '').toLowerCase() + ' "' + tgtLabel(r[4]) + '"'); x.src.set(sk, (x.src.get(sk) || 0) + r[9]); ST.set(r[6], x); }
+    for (const x of ST.values()) out.st.push(adR({ ...x, asin: isAsin(x.term), isExact: exact.has(x.term), isNeg: [...negs].some(n => n && x.term.includes(n)), srcTxt: [...x.src.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).join(' · ') }));
+    // advertised product (one ASIN today; works for more)
+    const PR = new Map(); for (const r of A.pr || []) { if (!inR(r[0])) continue; const x = PR.get(r[4]) || { ch: 'amz', id: r[4], asin: r[3], ...AD0(), same: 0, other: 0 }; adAdd(x, r[5], r[6], r[7], r[8], r[9], r[10]); x.same += r[11] || 0; x.other += r[13] || 0; PR.set(r[4], x); }
+    if (!PR.size && out.ch.amz.spend) PR.set('5C8N', { ch: 'amz', id: '5C8N', asin: 'B0HJQQ3MY4', ...JSON.parse(JSON.stringify(out.ch.amz)), units: out.ch.amz.units || out.ch.amz.orders, same: out.ch.amz.sales, other: 0 });
+    const cp = chanPeriod('amz', f, t), sold = groupBy(cp.all.filter(x => !x.tt), x => x.part);
+    for (const x of PR.values()) { const g = agg(sold.get(x.id) || []), e = econOf('amz', x.id), P = M.P[x.id] || {}; const stock = (pm.inv[x.id] || {}).onHand || 0, v30 = pm.v30[x.id] || 0;
+      out.prod.push(adR({ ...x, name: (P.name || x.id).replace(/ with .*/i, ''), kids: [x.id], col: P.col, units: g.units, rev: g.rev, gp: g.gp, adShare: g.units ? Math.min(1, x.units / g.units) : null, tacos: g.rev ? x.spend / g.rev : null, profit: g.gp - x.spend, be: e ? e.acos : null, beCpa: e ? e.contrib : null, stock, cover: v30 ? stock / (v30 / 30) : (stock ? Infinity : 0), rank: null, bid: [] })); }
+    out.amzEnt = ent; out.negs = negs; out.exact = exact;
+  }
+  for (const ch of chs) adR(out.ch[ch]); out.camps.forEach(c => { c.beAcos = c.ch === 'amz' ? (econOf('amz', '5C8N') || {}).acos : null; });
+  out.tot = adR(Object.values(out.ch).reduce((a, x) => adAdd(a, x.impr, x.clicks, x.spend, x.sales, x.orders, x.units), AD0()));
+  // channel break-even (ad-sales weighted)
+  out.be = {}; out.beCpa = {};
+  for (const ch of chs) { const ps = out.prod.filter(p => p.ch === ch && p.be != null), w = sum(ps, p => p.sales) || sum(ps, p => p.spend) || ps.length;
+    if (ps.length) { out.be[ch] = sum(ps, p => p.be * ((sum(ps, q => q.sales) ? p.sales : sum(ps, q => q.spend) ? p.spend : 1))) / w; out.beCpa[ch] = sum(ps, p => p.beCpa * ((sum(ps, q => q.sales) ? p.sales : sum(ps, q => q.spend) ? p.spend : 1))) / w; }
+    else { const e = ch === 'amz' ? econOf('amz', '5C8N') : null; if (e) { out.be[ch] = e.acos; out.beCpa[ch] = e.contrib; } } }
+  { const ps = out.prod.filter(p => p.ch === 'wf' && p.wsBe); if (ps.length) out.wsBe = sum(ps, p => p.wsBe * (p.spend || 1)) / sum(ps, p => p.spend || 1); }
+  for (const c of out.camps) if (c.ch === 'wf') c.beAcos = out.be.wf;
+  for (const p of out.pl.values()) adR(p);
+  for (const ch of ['wf', 'amz']) out.dow[ch].forEach(adR);
+  for (const v of out.daily.values()) { adR(v.wf); adR(v.amz); }
+  adR(out.b2b.pro); adR(out.b2b.con);
+  // thresholds for "no sale" judgements: 1.5× the clicks the account needs for one order, at least 8
+  out.thr = {}; for (const ch of chs) { const cvr = out.ch[ch].cvr || 0.03; out.thr[ch] = Math.min(40, Math.max(8, Math.round(1.5 / Math.max(cvr, 0.01)))); }
+  return out;
+}
+
+// Optimization plan: concrete actions ranked by money at stake
+function adsPlan(m) {
+  const acts = [], ins = [], beA = m.be.amz, beW = m.be.wf, tgtA = beA != null ? beA * 0.75 : null, days = diffDays(m.f, m.t) + 1, mo = 30 / days;
+  const push = (pri, ch, title, body, items = [], impact = '', usdv = 0) => acts.push({ pri, ch, title, body, items, impact, usdv });
+  // 1) budget-capped campaigns
+  for (const c of m.camps) {
+    if (c.ch === 'amz' && (/OUT_OF_BUDGET/.test(c.serving || '') || (c.rec && c.rec.inBudget != null && c.rec.inBudget < 0.95) || (c.nDays && c.capDays / c.nDays >= 0.3))) {
+      const good = c.acos != null && beA != null ? c.acos <= beA : c.orders > 0, r = c.rec || {};
+      const miss = r.sales && r.sales[1] ? ` Amazon estimates ${usd(r.sales[0])}–${usd(r.sales[1])} sales and ${r.clicks[0]}–${r.clicks[1]} clicks were missed in ${dShort(String(r.from).replace(/(\d{4})(\d\d)(\d\d)/, '$1-$2-$3'))}–${dShort(String(r.to).replace(/(\d{4})(\d\d)(\d\d)/, '$1-$2-$3'))} (in budget ${pct(r.inBudget)} of the time).` : '';
+      push(1, 'amz', good ? `Raise the budget of "${c.name}" from ${usd(c.budget)} to ${usd(r.sug || Math.ceil(c.budget * 1.5))}/day` : `"${c.name}" runs out of budget — cut wasted clicks before adding money`,
+        `${c.nDays ? `Capped on ${c.capDays} of ${c.nDays} days` : 'Out of budget today'}${c.usage != null ? `, ${pct(c.usage / 100)} of today's budget used` : ''}.${c.acos != null ? ` ACoS ${pct(c.acos, 1)} vs break-even ${pct(beA, 1)}.` : ''}${miss} ${good ? 'It converts below break-even, so every capped hour loses profitable sales.' : 'Its ACoS is above break-even: negate the non-converting search terms below first, then add budget.'}`, [], r.sales ? `+${usd(r.sales[0] * 30 / 7)}–${usd(r.sales[1] * 30 / 7)} sales / month` : '', (r.sales ? r.sales[1] : c.spend) * (good ? 4 : 1));
+    }
+    if (c.ch === 'wf' && c.budget && c.nDays && c.capDays / c.nDays >= 0.3) push(c.roas >= 1 / (beW || 1) ? 1 : 2, 'wf', `Wayfair "${c.name}" hits its ${usd(c.budget)}/day cap`, `Spent ≥95% of the cap on ${c.capDays} of ${c.nDays} days. ${c.orders ? `ROAS ${c.roas.toFixed(1)}× retail vs ${beW ? (1 / beW).toFixed(1) + '× needed' : '—'}: ${c.acos <= beW ? 'raise the cap 30–50%.' : 'lower the default bids on the listings with no orders before raising the cap.'}` : 'No attributed order yet: keep the cap, lower bids on the costliest listings.'}`, [], '', c.spend);
+  }
+  // 2) Amazon targets: no orders after enough clicks → bid down / pause
+  const thrA = m.thr.amz || 15, cpaA = m.beCpa.amz;
+  const bleed = m.tg.filter(x => x.orders === 0 && (x.clicks >= thrA || (cpaA && x.spend >= cpaA))).sort((a, b) => b.spend - a.spend);
+  if (bleed.length) push(1, 'amz', `Cut bids on ${bleed.length} target${bleed.length > 1 ? 's' : ''} with no order after ${thrA}+ clicks`, `${usd(sum(bleed, x => x.spend), 2)} spent with no sale. Lower the bid 30–50% (or pause product targets / auto groups) — the account needs about ${Math.round(1 / Math.max(m.ch.amz.cvr || 0.03, 0.01))} clicks per order, so these are statistically unlikely to recover at the current bid.`, bleed.slice(0, 12).map(x => `${x.label} · ${usd(x.spend, 2)}`), `save ≈ ${usd(sum(bleed, x => x.spend) * mo * 0.6)} / month`, sum(bleed, x => x.spend) * mo);
+  // 3) bids on converting targets
+  const hot = m.tg.filter(x => x.orders > 0 && x.acos != null);
+  const over = hot.filter(x => beA != null && x.acos > beA);
+  if (over.length) push(2, 'amz', `Lower bids on ${over.length} converting target${over.length > 1 ? 's' : ''} above break-even ACoS`, `New bid = CPC × target ACoS ÷ actual ACoS (target ${pct(tgtA, 0)} = 75% of break-even ${pct(beA, 0)}).`, over.map(x => `${x.label}: ${usd(x.bid || x.cpc, 2)} → ${usd(Math.max(0.2, x.cpc * tgtA / x.acos), 2)}`), '', sum(over, x => x.spend) * mo * 0.3);
+  const under = hot.filter(x => tgtA != null && x.acos <= tgtA && ((x.tos != null && x.tos < 0.15) || (x.rec && x.bid && x.bid < x.rec[0])));
+  if (under.length) push(1, 'amz', `Raise bids on ${under.length} profitable target${under.length > 1 ? 's' : ''}`, 'ACoS is under target but the top-of-search impression share is low or the bid sits below Amazon\'s suggested range — you are winning too few auctions on terms that already sell.', under.map(x => `${x.label}: ${usd(x.bid || x.cpc, 2)} → ${usd(x.rec ? Math.min(x.rec[1], (x.bid || x.cpc) * 1.4) : (x.bid || x.cpc) * 1.25, 2)}${x.tos != null ? ` (TOS IS ${pct(x.tos)})` : ''}`), 'more sales at a profitable ACoS', sum(under, x => x.sales) * mo);
+  const lowBid = m.tg.filter(x => x.rec && x.bid && x.state === 'ENABLED' && x.bid < x.rec[0] && x.impr < 200 && !under.includes(x));
+  if (lowBid.length) push(3, 'amz', `${lowBid.length} keyword${lowBid.length > 1 ? 's' : ''} bid below Amazon's suggested range`, 'Few impressions because the bid is under the low end of the suggested range. Raise to the low end to test them, or pause the ones you do not want.', lowBid.map(x => `${x.label}: ${usd(x.bid, 2)} (suggested ${usd(x.rec[0], 2)}–${usd(x.rec[2], 2)})`), '', 0);
+  // 4) search terms: negate / harvest
+  const negT = m.st.filter(x => x.orders === 0 && !x.isNeg && !x.isExact && (x.clicks >= thrA || (cpaA && x.spend >= cpaA * 0.8))).sort((a, b) => b.spend - a.spend);
+  if (negT.length) push(1, 'amz', `Add ${negT.length} negative keyword${negT.length > 1 ? 's' : ''}`, `Search terms that took ${thrA}+ clicks (or most of a break-even CPA of ${usd(cpaA, 2)}) without a sale. Add them as <b>negative exact</b> in the Auto / Phrase / product-target campaigns they came from; ASINs as negative product targets.`, negT.slice(0, 15).map(x => `${x.term} · ${x.clicks} clicks · ${usd(x.spend, 2)}`), `save ≈ ${usd(sum(negT, x => x.spend) * mo)} / month`, sum(negT, x => x.spend) * mo);
+  const harv = m.st.filter(x => x.orders >= 1 && !x.isExact && !x.asin && (beA == null || x.acos <= beA * 1.2)).sort((a, b) => b.orders - a.orders || b.sales - a.sales);
+  if (harv.length) push(1, 'amz', `Harvest ${harv.length} converting search term${harv.length > 1 ? 's' : ''} into Exact`, 'These terms produced orders through Auto / Phrase / Broad / product targeting but are not exact keywords yet. Add each as an <b>Exact</b> keyword (start at its average CPC) and as negative exact in the source campaign so the budget follows the proven term.', harv.slice(0, 12).map(x => `${x.term} · ${x.orders} order${x.orders > 1 ? 's' : ''} · ACoS ${pct(x.acos)}`), 'scale proven terms', sum(harv, x => x.sales) * mo);
+  const asinWin = m.st.filter(x => x.asin && x.orders >= 1);
+  if (asinWin.length) push(2, 'amz', `Target ${asinWin.length} competitor ASIN${asinWin.length > 1 ? 's' : ''} that already convert`, 'Shoppers on these product pages bought yours from an auto/category ad. Add them to the product-targeting campaign with their own bid.', asinWin.map(x => `${x.term.toUpperCase()} · ${x.orders} order${x.orders > 1 ? 's' : ''}`), '', sum(asinWin, x => x.sales) * mo);
+  // 5) placements
+  const pl = [...m.pl.entries()].filter(([, v]) => v.spend > 0), plTot = adR(pl.reduce((a, [, v]) => adAdd(a, v.impr, v.clicks, v.spend, v.sales, v.orders, v.units), AD0()));
+  const tos = (m.pl.get('Top of search') || {}), pp = (m.pl.get('Product pages') || {});
+  if (pl.length && plTot.roas != null) {
+    if (tos.spend && tos.roas != null && tos.roas > plTot.roas * 1.3 && tos.spend / plTot.spend < 0.5) push(2, 'amz', 'Raise the top-of-search placement adjustment', `Top of search returns ${tos.roas.toFixed(1)}× vs ${plTot.roas.toFixed(1)}× overall but takes only ${pct(tos.spend / plTot.spend)} of spend. Set +30–50% top-of-search on the Exact and Phrase campaigns.`, [], '', tos.sales * mo);
+    if (pp.spend && pp.spend / plTot.spend > 0.3 && (pp.roas || 0) < plTot.roas * 0.6) push(2, 'amz', 'Product-page placements dilute ROAS', `Product pages take ${pct(pp.spend / plTot.spend)} of spend at ${pp.roas == null ? 'no sales' : pp.roas.toFixed(1) + '×'} ROAS (account ${plTot.roas.toFixed(1)}×). Lower the Auto campaign's substitutes/complements groups and keep product-page adjustments at 0%.`, [], '', pp.spend * mo * 0.5);
+  }
+  // 6) Wayfair listings
+  const cpaW = m.beCpa.wf, thrW = m.thr.wf || 15;
+  const wfBleed = m.prod.filter(p => p.ch === 'wf' && p.orders === 0 && (p.clicks >= thrW * 1.5 || (cpaW && p.spend >= cpaW * 0.6))).sort((a, b) => b.spend - a.spend);
+  if (wfBleed.length) push(1, 'wf', `Lower default bids on ${wfBleed.length} Wayfair listing${wfBleed.length > 1 ? 's' : ''} with no order`, `${usd(sum(wfBleed, p => p.spend), 2)} spent without an attributed order. Check the listing first (price vs class, reviews, images, missing attributes in the Listing tab), then cut the default bid 25–40% or pause the listing in the Auto campaign.`, wfBleed.map(p => `${p.id} ${p.name.slice(0, 28)} · ${usd(p.spend, 2)} · ${p.clicks} clicks${p.bid.length ? ' · bid ' + usd(Math.max(...p.bid), 2) : ''}`), `save ≈ ${usd(sum(wfBleed, p => p.spend) * mo * 0.4)} / month`, sum(wfBleed, p => p.spend) * mo);
+  const wfWin = m.prod.filter(p => p.ch === 'wf' && p.orders >= 2 && beW != null && p.acos != null && p.acos < beW * 0.7);
+  if (wfWin.length) push(1, 'wf', `Push the Wayfair listings that convert profitably`, 'Retail ACoS well under break-even: raise their default bid 15–25% and give them a dedicated keyword campaign so they are not starved by the Auto campaign.', wfWin.map(p => `${p.id} · ROAS ${p.roas.toFixed(1)}× · ${p.orders} orders`), '', sum(wfWin, p => p.sales) * mo);
+  const wfOver = m.prod.filter(p => p.ch === 'wf' && p.orders > 0 && p.be != null && p.acos != null && p.acos > p.be);
+  if (wfOver.length) push(1, 'wf', `${wfOver.length} Wayfair listing${wfOver.length > 1 ? 's sell' : ' sells'} through ads at a loss`, 'Retail ACoS is above the listing\'s break-even (contribution per unit ÷ retail price): each ad sale costs more than it earns. Lower the default bid so CPC × clicks-per-order drops under the break-even CPA, or take the listing out of the broad Auto campaign.', wfOver.map(p => `${p.id} ${p.name.slice(0, 22)} · ACoS ${pct(p.acos)} vs BE ${pct(p.be)} · bid ${p.bid.length ? usd(Math.max(...p.bid), 2) + ' → ' + usd(Math.max(0.3, Math.max(...p.bid) * p.be * 0.75 / p.acos), 2) : '—'}`), `save ≈ ${usd(sum(wfOver, p => p.spend - p.sales * p.be * 0.75) * mo)} / month`, sum(wfOver, p => p.spend) * mo);
+  if (m.b2bOk && m.b2b.pro.spend > 0 && m.b2b.con.spend > 0) { const pr = m.b2b.pro, cn = m.b2b.con; if (pr.spend / (pr.spend + cn.spend) > 0.15 && (pr.roas || 0) < (cn.roas || 0) * 0.6) push(2, 'wf', 'Wayfair Professional (B2B) traffic converts worse', `B2B takes ${pct(pr.spend / (pr.spend + cn.spend))} of Wayfair spend at ${pr.roas == null ? 'no sales' : pr.roas.toFixed(1) + '×'} vs ${cn.roas == null ? 'no sales' : cn.roas.toFixed(1) + '×'} for consumers. Ask your Wayfair ads contact to exclude Professional placements, or lower bids on the listings B2B clicks most.`, [], `save ≈ ${usd(pr.spend * mo * 0.5)} / month`, pr.spend * mo * 0.5); }
+  // 7) stock
+  const low = m.prod.filter(p => p.spend > 0 && p.cover != null && isFinite(p.cover) && p.cover < 21 && p.stock > 0);
+  if (low.length) push(1, new Set(low.map(p => p.ch)).size === 1 ? low[0].ch : 'all', `Slow ads on ${low.length} SKU group${low.length > 1 ? 's' : ''} about to run out`, 'Under 3 weeks of stock at the 30-day pace. Running out costs ranking on both channels; cut bids now and restart when the inbound lands.', low.map(p => `${p.id} · ${Math.round(p.cover)} days · ${n0(p.stock)} on hand`), '', 0);
+  const oos = m.prod.filter(p => p.spend > 0 && p.stock === 0); if (oos.length) push(1, new Set(oos.map(p => p.ch)).size === 1 ? oos[0].ch : 'all', `Stop ads on out-of-stock items`, 'Spend on items with no stock in CastleGate.', oos.map(p => `${p.id} · ${usd(p.spend, 2)}`), `save ${usd(sum(oos, p => p.spend) * mo)} / month`, sum(oos, p => p.spend) * mo);
+  if ((m.wfIdle || []).length) push(3, 'wf', `${m.wfIdle.length} in-stock Wayfair listing${m.wfIdle.length > 1 ? 's are' : ' is'} not advertised`, 'They get no ad traffic at all. Add them to the Auto campaign at a low bid ($0.40–0.60) to learn their conversion rate.', m.wfIdle, '', 0);
+  // 8) weekday
+  for (const ch of m.chs) { const D7 = m.dow[ch], tot = sum(D7, x => x.spend); if (tot < 20 || sum(D7, x => x.orders) < 20) continue; const avg = sum(D7, x => x.sales) / tot; const bad = D7.map((x, i) => ({ ...x, i })).filter(x => x.spend / tot > 0.1 && (x.roas || 0) < avg * 0.5);
+    if (bad.length && avg > 0) push(3, ch, `${chName(ch)}: weak days — ${bad.map(x => DOWS[x.i]).join(', ')}`, `These weekdays take ${pct(sum(bad, x => x.spend) / tot)} of spend at ROAS ${(sum(bad, x => x.sales) / sum(bad, x => x.spend)).toFixed(1)}× vs ${avg.toFixed(1)}× on average.${ch === 'amz' ? ' Use a schedule-based budget rule (−30% on those days) or bid down by schedule.' : ' Wayfair has no day-parting: lower the daily cap if this persists 4+ weeks.'} Small samples — confirm over a longer range.`, [], '', sum(bad, x => x.spend) * mo * 0.3); }
+  acts.sort((a, b) => a.pri - b.pri || b.usdv - a.usdv);
+  return acts;
+}
+
+function adsScatter(pts, { be, w = CW('half'), h = 320 } = {}) {
+  pts = pts.filter(p => p.spend > 0); if (!pts.length) return '<div class="empty">No spend in this period</div>';
+  const C = SER(), L = 56, R = 14, T = 16, B = 40;
+  const xmax = nice(Math.max(...pts.map(p => p.spend)) * 1.08).max, acs = pts.map(p => p.acos == null ? null : Math.min(p.acos, 3)), ymax = Math.max(1, Math.ceil(Math.max(be || 0, ...acs.filter(v => v != null)) * 1.15 * 10) / 10);
+  const X = v => L + v / xmax * (w - L - R), Y = v => T + (1 - v / (ymax * 1.08)) * (h - T - B), yNo = T + 4;
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img"><g class="grid">`;
+  const ys = nice(ymax, 4); for (let v = 0; v <= ymax + 1e-9; v += ys.step) s += `<line x1="${L}" x2="${w - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${pct(v)}</text>`;
+  const xs = nice(xmax, 4); for (let v = 0; v <= xmax + 1e-9; v += xs.step) s += `<text x="${X(v)}" y="${h - B + 16}" text-anchor="middle">${esc(usdK(v))}</text>`;
+  s += `</g>`;
+  if (be != null) s += `<line x1="${L}" x2="${w - R}" y1="${Y(be)}" y2="${Y(be)}" stroke="var(--crit)" stroke-dasharray="4 3"/><text x="${w - R}" y="${Y(be) - 5}" text-anchor="end" class="g-axis" style="fill:var(--crit-ink)">break-even ACoS ${pct(be)}</text>`;
+  s += `<text x="${L + 4}" y="${yNo + 8}" class="g-axis">no sale ↑</text>`;
+  for (const p of pts) { const y = p.acos == null ? yNo + 14 + (p.i || 0) % 3 * 4 : Y(Math.min(p.acos, ymax)); const col = p.ch === 'amz' ? C[2] : C[0];
+    s += `<circle cx="${X(p.spend)}" cy="${y}" r="${Math.min(14, 4 + Math.sqrt(p.clicks || 0))}" fill="${col}" fill-opacity="${p.acos == null ? .35 : .8}" stroke="var(--glass-strong)" stroke-width="2" data-tip="${esc(tipRows(p.label, [['Channel', chName(p.ch)], ['Type', p.kind || ''], ['Spend', usd(p.spend, 2)], ['Clicks', n0(p.clicks)], ['Orders', n0(p.orders)], ['Ad sales', usd(p.sales)], ['ACoS', pct(p.acos, 1)], ['CPC', p.cpc == null ? '—' : usd(p.cpc, 2)]]))}"/>`; }
+  s += `<text x="${(L + w - R) / 2}" y="${h - 6}" text-anchor="middle" class="g-axis">Ad spend in the period →</text></svg>`;
+  return `<div class="chart">${s}</div><div class="legend">${S.platform !== 'amz' ? `<span><i style="background:${C[0]}"></i>Wayfair listing</span>` : ''}${S.platform !== 'wf' ? `<span><i style="background:${C[2]}"></i>Amazon keyword / target</span>` : ''}<span>Dot size = clicks · faded dots at the top = spend with no sale</span></div>`;
+}
+function adsFunnel(m) {
+  const C = SER(), rows = m.chs.map(ch => ({ ch, x: m.ch[ch] })).filter(r => r.x.impr || r.x.spend);
+  if (!rows.length) return '<div class="empty">No ad traffic in this period</div>';
+  const st = [['Impressions', 'impr'], ['Clicks', 'clicks'], ['Orders', 'orders']];
+  return `<div class="afun">${rows.map(r => `<div class="afun-col"><div class="afun-h">${chName(r.ch)}</div>${st.map(([l, k], i) => { const v = r.x[k], top = r.x.impr || 1, w = Math.max(6, Math.pow(v / top, 0.28) * 100);
+    const rate = i === 1 ? ['CTR', pct(r.x.ctr, 2)] : i === 2 ? ['CVR', pct(r.x.cvr, 1)] : null;
+    return `${rate ? `<div class="afun-rate">↓ ${rate[0]} <b>${rate[1]}</b></div>` : ''}<div class="afun-bar" style="width:${w}%;background:${r.ch === 'amz' ? C[2] : C[0]}" data-tip="${esc(tipRows(chName(r.ch) + ' · ' + l, [[l, n0(v)]]))}"><span>${l}</span><b>${n0(v)}</b></div>`; }).join('')}
+    <div class="afun-foot"><span>CPC <b>${r.x.cpc == null ? '—' : usd(r.x.cpc, 2)}</b></span><span>CPA <b>${r.x.cpa == null ? '—' : usd(r.x.cpa, 2)}</b></span><span>AOV <b>${r.x.aov == null ? '—' : usd(r.x.aov)}</b></span><span>Break-even CPA <b>${m.beCpa[r.ch] == null ? '—' : usd(m.beCpa[r.ch], 2)}</b></span></div></div>`).join('')}</div>`;
+}
+
 function viewAds() {
   const [f, t] = range(), [pf, pt] = prevRange(), C = SER();
   const cur = period(f, t), prev = period(pf, pt), ad = cur.ad, pa = prev.ad, a = cur.a;
+  const m = adsModel(f, t), pm = adsModel(pf, pt), acts = adsPlan(m);
   const roas = ad.spend ? ad.sales / ad.spend : null, proas = pa.spend ? pa.sales / pa.spend : null;
-  const days = daysOf(f, t), dd = days.map(d => ad.daily.get(d) || { spend: 0, sales: 0, clicks: 0, impr: 0 });
-  const meta = new Map(((D.wf.ads && D.wf.ads.camps) || []).map(c => [c[0], c]));
-  const camps = [...ad.camps.values()].map(c => { const m = meta.get(c.id) || []; return { ...c, name: m[1] || c.id, status: m[2], cap: m[5], ctr: c.impr ? c.clicks / c.impr : null, cpc: c.clicks ? c.spend / c.clicks : null, roas: c.spend ? c.sales / c.spend : null, acos: c.sales ? c.spend / c.sales : null }; });
-  const listings = Object.entries(ad.byListing).map(([lid, x]) => { const kids = M.listingParts[lid] || []; const p = M.P[kids[0]] || {}; return { lid, name: (p.name || lid).replace(/ with .*/i, ''), col: p.col, ...x, roas: x.spend ? x.sales / x.spend : null, alloc: kids.filter(k => ad.byPart[k] > 0.005).map(k => `${k} ${usd(ad.byPart[k])}`).join(' · ') }; });
   const abk = adBuckets(cur, f, t, autoGran(f, t)), adTip = b => [['Ad spend', usd(b.spend, 2), C[0]], ['Ad sales', usd(b.sales), C[2]], ['ROAS', b.roas == null ? '—' : b.roas.toFixed(1) + '×'], ['ACoS', pct(b.acos, 1)], ['TACoS', b.tacos == null ? 'no sales' : pct(b.tacos, 1)], ['Clicks', n0(b.clicks)], ['CTR', pct(b.ctr, 2)], ['CPC', b.cpc == null ? '—' : usd(b.cpc, 2)], ['Ad orders', n0(b.orders)]];
   const sp = (k, c, dash) => ({ vals: abk.map(b => b[k]), color: C[c], dash });
-  const amzApi = !!((D.amz && D.amz.ads && D.amz.ads.daily) || []).length;
-  const amzNote = S.platform === 'wf' ? '' : amzApi ? `<div class="alert info"><span class="ic">i</span><div><b>Channel coverage: Wayfair + Amazon</b><span>Amazon Sponsored Products come from the Amazon Ads API (daily report, refreshed every 6 hours; Amazon attributes sales within 14 days of a click). Spend is before Amazon's 10% tax on ad charges — the tax is in Profit › Amazon fees. Campaign and listing tables below are per channel.</span></div></div>` : `<div class="alert info"><span class="ic">i</span><div><b>Channel coverage</b><span>Ad spend and TACoS include Amazon (ad charges Amazon billed to the account). Ad sales, ROAS, ACoS, clicks, impressions, CPC, ad orders and the campaign tables are <b>Wayfair only</b> until the Amazon Ads API is connected.</span></div></div>`;
+  const T = m.tot, P = pm.tot, both = S.platform === 'all', beAll = both ? (m.be.wf != null && m.be.amz != null ? (m.be.wf * m.ch.wf.sales + m.be.amz * m.ch.amz.sales) / ((m.ch.wf.sales + m.ch.amz.sales) || 1) || (m.be.wf + m.be.amz) / 2 : m.be.wf ?? m.be.amz) : m.be[S.platform];
+  const wasted = sum(m.tg.filter(x => x.orders === 0), x => x.spend) + sum(m.prod.filter(p => p.ch === 'wf' && p.orders === 0), p => p.spend), wastedBase = sum(m.tg, x => x.spend) + sum(m.prod.filter(p => p.ch === 'wf'), p => p.spend);
+  const adShareRev = (() => { let num = 0, den = 0; for (const ch of m.chs) { const cp = chanPeriod(ch, f, t).a; den += cp.rev; num += ch === 'wf' ? (m.ws || m.ch.wf.sales * 0.5) : m.ch.amz.sales; } return den ? Math.min(1, num / den) : null; })();
+  const ratio = (v, d) => v == null ? '—' : v.toFixed(d ?? 1) + '×';
+  const lag = diffDays(f, M.today) < 14 || diffDays(t, M.today) < 14;
+  const tag = ch => `<span class="tag only ${ch} mini">${ch === 'amz' ? 'AMZ' : 'WF'}</span>`, only = ch => S.platform === 'all' ? tag(ch) : '';
+  const chTag2 = ch => ch === 'all' ? '<small>Both channels</small>' : `<small>${chName(ch)}</small>`;
+
+  // ---------- KPIs
+  const kp = `<div class="grid g-kpi k5">
+    ${kpi('Ad Spend', usd(ad.spend, 0), `${delta(ad.spend, pa.spend, { invert: true })} ${vsPrev()}`, 'Spend on Wayfair Sponsored Products and Amazon Sponsored Products in the period (Amazon before its 10% tax on ad charges).', sp('spend', 0))}
+    ${kpi('Ad Sales', usd(ad.sales), `${delta(ad.sales, pa.sales)} 14-day attributed`, 'Sales the platforms attribute to an ad within 14 days. Wayfair counts the retail price the customer paid (about 2× your wholesale); Amazon counts your selling price.', sp('sales', 2))}
+    ${kpi('ROAS', ratio(roas), `${delta(roas, proas)} break-even ${beAll ? ratio(1 / beAll) : '—'}`, 'Ad sales ÷ ad spend. Break-even ROAS = price ÷ contribution per unit before ads: below it, ads lose money.', sp('roas', 4, true))}
+    ${kpi('ACoS', `<span style="color:${beAll && T.acos > beAll ? 'var(--crit-ink)' : 'inherit'}">${pct(T.acos, 1)}</span>`, `break-even ${pct(beAll, 0)} · target ${pct(beAll ? beAll * 0.75 : null, 0)}`, 'Ad spend ÷ ad sales. Break-even ACoS = contribution per unit before ads ÷ the price the platform reports (Wayfair retail, Amazon selling price). Target = 75% of break-even, keeping a quarter of the margin as profit.', sp('acos', 4, true))}
+    ${kpi('TACoS', pct(a.rev ? ad.spend / a.rev : null, 1), `${delta(a.rev ? ad.spend / a.rev : null, prev.a.rev ? pa.spend / prev.a.rev : null, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ total revenue (Wayfair wholesale + Amazon), organic included. The number that tells whether ads build the business or just buy sales.', sp('tacos', 4, true))}
+    ${kpi('Ad Orders', n0(T.orders), `${delta(T.orders, P.orders)} ${n0(T.units)} units`, 'Orders attributed to ads within 14 days.', sp('orders', 3))}
+    ${kpi('Conversion (CVR)', pct(T.cvr, 1), `${delta(T.cvr, P.cvr, { pp: true })} orders ÷ clicks`, 'Share of ad clicks that became an order. Furniture benchmarks: 1–3% on Wayfair, 5–10% on Amazon home & kitchen.', null)}
+    ${kpi('CPC', T.cpc == null ? '—' : usd(T.cpc, 2), `${delta(T.cpc, P.cpc, { invert: true })} CTR ${pct(T.ctr, 2)}`, 'Average cost per click.', sp('cpc', 0))}
+    ${kpi('Cost per order', T.cpa == null ? '—' : usd(T.cpa, 2), `${delta(T.cpa, P.cpa, { invert: true })} AOV ${T.aov == null ? '—' : usd(T.aov)}`, 'Ad spend ÷ ad orders (CPA). Compare with the contribution one unit earns before ads.', null)}
+    ${kpi('Wasted spend', pct(wastedBase ? wasted / wastedBase : null, 0), `${usd(wasted)} on targets / listings with no order`, 'Spend on Amazon keywords & targets and Wayfair listings that produced no attributed order in the period.', null)}
+  </div>`;
+  const cov = `<div class="alert info"><span class="ic">i</span><div><b>Data coverage</b><span>${S.platform !== 'amz' ? 'Wayfair: campaign, listing and class-rank reports from the Wayfair Advertising API (Wayfair offers no keyword or search-term report for Sponsored Products). ' : ''}${S.platform !== 'wf' ? 'Amazon: campaign, placement, keyword/target, search-term and product reports plus live bids, budgets, negatives and Amazon\'s budget & bid suggestions from the Amazon Ads API. ' : ''}Both use 14-day attribution${lag ? ' — <i style="font-style:normal;font-weight:700;color:var(--ink)">the last 14 days are still filling in</i>, so ROAS/ACoS there will improve as late orders get attributed' : ''}. Wayfair ad sales are retail; ad share of revenue uses Wayfair's attributed wholesale.${m.notes.length ? ' ' + m.notes.join(' ') : ''}</span></div></div>`;
+
+  // ---------- insights (what the numbers say)
+  const ins = [];
+  if (both && m.ch.wf.spend && m.ch.amz.spend) { const w = m.ch.wf, z = m.ch.amz; ins.push(`<b>Channel mix:</b> Wayfair takes ${pct(w.spend / T.spend)} of spend at ${ratio(w.roas)} ROAS (retail) and ${pct(w.cvr, 1)} CVR; Amazon ${pct(z.spend / T.spend)} at ${ratio(z.roas)} and ${pct(z.cvr, 1)} CVR. Per order Wayfair costs ${w.cpa == null ? 'n/a (no order)' : usd(w.cpa, 2)} vs Amazon ${z.cpa == null ? 'n/a' : usd(z.cpa, 2)}.`); }
+  if (m.ch.wf && m.ch.wf.spend && m.ws) ins.push(`<b>Wayfair true return:</b> ${ratio(m.ch.wf.roas)} on retail is ${ratio(m.ws / m.ch.wf.spend)} on the wholesale you actually invoice — judge Wayfair ads on the wholesale ROAS (break-even ${m.wsBe ? ratio(m.wsBe) : '—'}: wholesale ÷ contribution per unit).`);
+  for (const ch of m.chs) { const x = m.ch[ch], bc = m.beCpa[ch]; if (x.orders && bc != null) ins.push(`<b>${chName(ch)} unit economics:</b> one ad order costs ${usd(x.cpa, 2)} while a unit earns ${usd(bc, 2)} before ads${x.cpa > bc ? ` — <b style="display:inline;color:var(--crit-ink)">each ad-driven sale loses about ${usd(x.cpa - bc, 2)}</b>. Either lower CPA (bids, negatives, conversion) below ${usd(bc, 2)}, lift the price/margin, or treat the spend as a launch investment for reviews and rank with a fixed monthly cap.` : `, so ads are profitable per order (${usd(bc - x.cpa, 2)} left per ad sale) — room to scale.`}`); }
+  if (adShareRev != null) ins.push(`<b>Ad dependency:</b> ${pct(adShareRev)} of revenue in the period came through an ad. ${adShareRev > 0.6 ? 'High — organic rank is thin; reviews, content and price are needed so sales do not stop when ads pause.' : adShareRev < 0.25 ? 'Low — most sales are organic; there is room to scale ads on what converts.' : 'Healthy mix of paid and organic.'}`);
+  const pl = [...m.pl.entries()].filter(([, v]) => v.spend > 0).sort((x, y) => y[1].spend - x[1].spend);
+  if (pl.length) { const best = pl.filter(([, v]) => v.orders).sort((x, y) => y[1].roas - x[1].roas)[0]; ins.push(`<b>Amazon placements:</b> ${pl.map(([k, v]) => `${k} ${pct(v.spend / sum(pl, p => p[1].spend))} of spend (${v.roas ? ratio(v.roas) : 'no sale'})`).join(', ')}.${best ? ` Best return: ${best[0]}.` : ''}`); }
+  const topT = m.tg.filter(x => x.orders).sort((x, y) => y.sales - x.sales)[0]; if (topT) ins.push(`<b>Best Amazon target:</b> "${esc(topT.label)}" — ${topT.orders} order${topT.orders > 1 ? 's' : ''}, ACoS ${pct(topT.acos)}, CPC ${usd(topT.cpc, 2)}.`);
+  const nST = m.st.length, cST = m.st.filter(x => x.orders).length; if (nST) ins.push(`<b>Search terms:</b> ${n0(nST)} distinct shopper queries triggered your ads; ${cST} converted. ${pct(sum(m.st.filter(x => !x.orders), x => x.spend) / (sum(m.st, x => x.spend) || 1))} of search-term spend went to queries with no order.`);
+  const autoC = m.camps.filter(c => c.ch === 'amz' && c.type === 'Auto'), manC = m.camps.filter(c => c.ch === 'amz' && c.type === 'Manual');
+  if (autoC.length && manC.length && sum(autoC, c => c.spend) > 0 && sum(manC, c => c.spend) > 0) { const au = adR(autoC.reduce((s, c) => adAdd(s, c.impr, c.clicks, c.spend, c.sales, c.orders, c.units), AD0())), ma = adR(manC.reduce((s, c) => adAdd(s, c.impr, c.clicks, c.spend, c.sales, c.orders, c.units), AD0())); ins.push(`<b>Amazon Auto vs Manual:</b> Auto ${pct(au.spend / ((au.spend + ma.spend) || 1))} of spend at ACoS ${pct(au.acos)}, Manual at ${pct(ma.acos)}. Mature accounts run 20–30% Auto (discovery) and the rest on harvested Exact keywords.`); }
+  const wfL = m.prod.filter(p => p.ch === 'wf' && p.spend > 0); if (wfL.length) { const top = [...wfL].sort((x, y) => y.spend - x.spend); ins.push(`<b>Wayfair spend concentration:</b> ${top.slice(0, 3).map(p => `${p.id} ${pct(p.spend / sum(wfL, q => q.spend))}`).join(', ')} of listing spend; ${wfL.filter(p => p.orders).length} of ${wfL.length} advertised listings got an order.`); }
+  const rk = m.prod.filter(p => p.rank && p.rank0 && p.rank0 !== p.rank); if (rk.length) ins.push(`<b>Wayfair class rank</b> (lower = better): ${rk.sort((x, y) => (x.rank - x.rank0) - (y.rank - y.rank0)).slice(0, 4).map(p => `${p.id} ${n0(p.rank0)} → ${n0(p.rank)}`).join(', ')}.`);
+  if (m.b2bOk && m.b2b.pro.spend) ins.push(`<b>Wayfair Professional (B2B):</b> ${pct(m.b2b.pro.spend / (m.ch.wf.spend || 1))} of Wayfair spend, ${m.b2b.pro.orders} order${m.b2b.pro.orders === 1 ? '' : 's'}, ROAS ${ratio(m.b2b.pro.roas)} vs consumer ${ratio(m.b2b.con.roas)}.`);
+  const ym = M.today.slice(0, 7), ki = D.kpi ? D.kpi.months.indexOf(ym) : -1;
+  if (ki >= 0 && D.kpi.ads && both) { const mt = adsModel(ym + '-01', M.today).tot.spend, dIn = daysIn(ym), dNow = +M.today.slice(8, 10), proj = mt / dNow * dIn, plan = D.kpi.ads[ki]; ins.push(`<b>Budget pacing (${MON[+ym.slice(5) - 1]}):</b> ${usd(mt)} spent month-to-date, on track for ${usd(proj)} vs the ${usd(plan)} plan (${pct(proj / plan)}).${proj < plan * 0.7 ? ' Under-spending: the plan assumes more reach — add budget to the campaigns that convert below break-even.' : proj > plan * 1.1 ? ' Over plan: tighten bids on non-converting targets first.' : ''}`); }
+
+  // ---------- channel scorecard
+  const scRows = [...m.chs.map(ch => ({ k: chName(ch), ch, ...m.ch[ch], be: m.be[ch], beCpa: m.beCpa[ch], rev: chanPeriod(ch, f, t).a.rev })), ...(both ? [{ k: 'Total', ch: 'all', ...T, be: beAll, rev: a.rev }] : [])].map(r => ({ ...r, tacos: r.rev ? r.spend / r.rev : null }));
+  const score = table('adsc', [{ k: 'k', l: 'Channel', f: (v, r) => `<b>${esc(v)}</b>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: n0 }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: n0 }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'cvr', l: 'CVR', num: true, f: v => pct(v, 1) }, { k: 'orders', l: 'Orders', num: true }, { k: 'cpa', l: 'CPA', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => ratio(v) }, { k: 'acos', l: 'ACoS', num: true, f: (v, r) => `<span style="color:${r.be != null && v > r.be ? 'var(--crit-ink)' : 'inherit'}">${pct(v, 1)}</span>` }, { k: 'be', l: 'Break-even ACoS', num: true, f: v => pct(v, 0) }, { k: 'tacos', l: 'TACoS', num: true, f: v => pct(v, 1) }], scRows, { def: null });
+
+  // ---------- campaigns (both channels)
+  const campRows = m.camps.map(c => ({ ...c, status: c.ch === 'amz' ? (c.serving || c.state || '') : (c.state || '') }));
+  const campTbl = table('acamp', [
+    { k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b> ${only(r.ch)}<div class="sub">${esc(r.type || '')}${r.budget ? ' · ' + usd(r.budget) + '/day' : ''}${r.start ? ' · since ' + dShort(r.start) : ''}${r.ch === 'amz' && r.top ? ' · TOS +' + r.top + '%' : ''}${r.status && !/ENABLED$|^ACTIVE$/.test(r.status) ? ` · <b style="color:var(--crit-ink)">${esc(r.status.replace(/CAMPAIGN_|_/g, ' ').trim().toLowerCase())}</b>` : ''}</div>` },
+    { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'util', l: 'Budget used', num: true, f: (v, r) => v == null ? '—' : `${pct(v)}${r.capDays ? `<div class="sub">capped ${r.capDays}/${r.nDays} d</div>` : ''}` },
+    { k: 'impr', l: 'Impr.', num: true, f: n0 }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'cvr', l: 'CVR', num: true, f: v => pct(v, 1) },
+    { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'acos', l: 'ACoS', num: true, f: (v, r) => `<span style="color:${r.beAcos != null && v > r.beAcos ? 'var(--crit-ink)' : 'inherit'}">${pct(v, 1)}</span>` }, { k: 'roas', l: 'ROAS', num: true, f: v => ratio(v) },
+    { k: 'tos', l: 'Top-of-search IS', num: true, f: v => v == null ? '—' : pct(v, 0) },
+    { k: 'act', l: 'Read', nosort: true, f: (v, r) => { const be = r.beAcos; if (!r.spend) return '<span class="tag">No spend</span>'; if (!r.orders) return r.clicks >= (m.thr[r.ch] || 15) ? '<span class="tag bad">Bleeding</span>' : '<span class="tag">Learning</span>'; if (be != null && r.acos > be) return '<span class="tag warn">Above break-even</span>'; if (r.capDays && r.nDays && r.capDays / r.nDays >= 0.3) return '<span class="tag good">Scale: budget-capped</span>'; return '<span class="tag good">Profitable</span>'; } }], campRows, { def: { k: 'spend', d: 'desc' } });
+
+  // ---------- Amazon targeting / search terms / placements
+  const amzOn = S.platform !== 'wf' && m.chs.includes('amz');
+  const tgRead = x => { const be = m.be.amz, tg = be != null ? be * 0.75 : null; if (!x.spend) return x.state === 'ENABLED' ? '<span class="tag">No traffic</span>' : '<span class="tag">' + esc((x.state || '').toLowerCase()) + '</span>'; if (!x.orders) return x.clicks >= (m.thr.amz || 15) ? '<span class="tag bad">Cut bid / pause</span>' : '<span class="tag">Learning</span>'; if (be != null && x.acos > be) return `<span class="tag warn">Bid → ${usd(Math.max(0.2, x.cpc * tg / x.acos), 2)}</span>`; if (tg != null && x.acos <= tg) return `<span class="tag good">Raise bid${x.rec ? ' → ' + usd(Math.min(x.rec[1], (x.bid || x.cpc) * 1.4), 2) : ''}</span>`; return '<span class="tag good">Keep</span>'; };
+  const tgTbl = table('atg', [{ k: 'label', l: 'Keyword / target', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.kind)}${r.match && r.kind === 'Keyword' ? ' · ' + esc(r.match.toLowerCase()) : ''} · ${esc(r.camp)}</div>` },
+    { k: 'bid', l: 'Bid', num: true, f: (v, r) => v == null ? '—' : usd(v, 2) + (r.rec ? `<div class="sub">sugg. ${usd(r.rec[0], 2)}–${usd(r.rec[2], 2)}</div>` : '') }, { k: 'impr', l: 'Impr.', num: true, f: n0 }, { k: 'tos', l: 'TOS IS', num: true, f: v => v == null ? '—' : pct(v, 0) }, { k: 'clicks', l: 'Clicks', num: true, f: n0 }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) },
+    { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'cvr', l: 'CVR', num: true, f: v => pct(v, 1) }, { k: 'acos', l: 'ACoS', num: true, f: (v) => `<span style="color:${m.be.amz != null && v > m.be.amz ? 'var(--crit-ink)' : 'inherit'}">${pct(v, 1)}</span>` }, { k: 'r', l: 'Action', nosort: true, f: (v, r) => tgRead(r) }], m.tg, { def: { k: 'spend', d: 'desc' } });
+  const stRead = x => x.isNeg ? '<span class="tag">Negated</span>' : x.orders ? (x.isExact ? '<span class="tag good">Exact keyword</span>' : x.asin ? '<span class="tag good">Target this ASIN</span>' : '<span class="tag good">Harvest → Exact</span>') : x.clicks >= (m.thr.amz || 15) || (m.beCpa.amz && x.spend >= m.beCpa.amz * 0.8) ? '<span class="tag bad">Add negative</span>' : x.clicks >= 3 ? '<span class="tag warn">Watch</span>' : '<span class="tag">Low data</span>';
+  const stTbl = table('ast', [{ k: 'term', l: 'Shopper search term', f: (v, r) => `<b>${esc(r.asin ? v.toUpperCase() : v)}</b><div class="sub">${esc(r.srcTxt)}</div>` }, { k: 'impr', l: 'Impr.', num: true, f: n0 }, { k: 'clicks', l: 'Clicks', num: true, f: n0 }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Sales', num: true, f: v => usd(v) }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }, { k: 'r', l: 'Action', nosort: true, f: (v, r) => stRead(r) }], m.st, { def: { k: 'spend', d: 'desc' }, max: S.stAll ? 0 : 40 });
+  const plRows = [...m.pl.entries()].map(([k, v]) => ({ k, ...v })), plTot = sum(plRows, r => r.spend);
+  const plCard = plRows.length ? hbars(plRows.sort((x, y) => y.spend - x.spend).map(r => ({ label: r.k, v: r.spend, sub: `${r.roas ? ratio(r.roas) + ' ROAS' : 'no sale'} · CPC ${r.cpc == null ? '—' : usd(r.cpc, 2)}`, color: C[2], extra: [['Share of spend', pct(r.spend / plTot, 1)], ['Impressions', n0(r.impr)], ['Clicks', n0(r.clicks)], ['CTR', pct(r.ctr, 2)], ['CVR', pct(r.cvr, 1)], ['Orders', n0(r.orders)], ['Ad sales', usd(r.sales)], ['ACoS', pct(r.acos, 1)]] })), { fmt: v => usd(v, 2) }) : '<div class="empty">Placement report arrives with the next Ads sync.</div>';
+
+  // ---------- products / listings: paid vs organic
+  const prodTbl = table('aprod', [{ k: 'name', l: 'Listing / SKU', f: (v, r) => `<b title="${esc(v)}">${esc(v.length > 34 ? v.slice(0, 32) + '…' : v)}</b> ${only(r.ch)}<div class="sub">${esc(r.id)}${r.kids && r.kids.length > 1 ? ' · ' + r.kids.join(', ') : ''}${r.bid && r.bid.length ? ' · bid ' + usd(Math.max(...r.bid), 2) : ''}</div>` },
+    { k: 'spend', l: 'Ad spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks · CVR', num: true, f: (v, r) => `${n0(v)}<div class="sub">CVR ${pct(r.cvr, 1)}</div>` },
+    { k: 'orders', l: 'Ad orders / all units', num: true, f: (v, r) => `${n0(v)} / ${n0(r.units)}<div class="sub">${r.adShare == null ? 'no sales' : pct(r.adShare) + ' from ads'}</div>` },
+    { k: 'acos', l: 'ACoS', num: true, f: (v, r) => `<span style="color:${r.be != null && v > r.be ? 'var(--crit-ink)' : 'inherit'}">${pct(v, 1)}</span><div class="sub">break-even ${pct(r.be, 0)}</div>` }, { k: 'tacos', l: 'TACoS', num: true, f: v => pct(v, 1) },
+    { k: 'profit', l: 'Contribution after ads', num: true, neg: true, f: v => usd(v) }, { k: 'cover', l: 'Stock cover', num: true, sv: r => isFinite(r.cover) ? r.cover : 9999, f: (v, r) => r.stock ? (isFinite(v) ? `<span style="color:${v < 21 ? 'var(--crit-ink)' : 'inherit'}">${Math.round(v)} d</span>` : 'no sales') + `<div class="sub">${n0(r.stock)} units</div>` : '<span class="tag bad">Out</span>' },
+    { k: 'rank', l: 'Class rank', num: true, f: (v, r) => v == null ? '—' : `${n0(v)}${r.rank0 && r.rank0 !== v ? `<div class="sub" style="color:${v < r.rank0 ? 'var(--good-ink)' : 'var(--crit-ink)'}">${v < r.rank0 ? '▲' : '▼'} from ${n0(r.rank0)}</div>` : ''}` }], m.prod, { def: { k: 'spend', d: 'desc' } });
+  const scat = adsScatter([...m.prod.filter(p => p.ch === 'wf').map(p => ({ ...p, label: p.id + ' ' + p.name, kind: 'Listing' })), ...m.tg.map((x, i) => ({ ...x, i, label: x.label, kind: x.kind }))], { be: both ? null : m.be[S.platform] ?? null });
+
+  // ---------- weekday
+  const dowOk = m.chs.some(ch => sum(m.dow[ch], x => x.spend)), dcols = [1, 2, 3, 4, 5, 6, 0], dtip = (ch, c) => { const x = m.dow[ch][c]; return tipRows(chName(ch) + ' · ' + DOWS[c], [['Spend', usd(x.spend, 2)], ['Clicks', n0(x.clicks)], ['Orders', n0(x.orders)], ['Ad sales', usd(x.sales)], ['ROAS', ratio(x.roas)], ['CVR', pct(x.cvr, 1)]]); };
+  const dowH = dowOk ? `<p class="sub" style="margin:2px 0 6px">Spend</p>${heatmap(m.chs, dcols, (ch, c) => m.dow[ch][c].spend, { fmt: v => usd(v), rowLabel: chName, colLabel: c => DOWS[c], tip: (ch, c) => dtip(ch, c), color: 0 })}<p class="sub" style="margin:12px 0 6px">ROAS (ad sales ÷ spend) · blank = no ad sale that day</p>${heatmap(m.chs, dcols, (ch, c) => m.dow[ch][c].roas || 0, { fmt: v => v.toFixed(1) + '×', rowLabel: chName, colLabel: c => DOWS[c], tip: (ch, c) => dtip(ch, c), color: 2, totLabel: 'Period', total: ch => ratio(m.ch[ch].roas) })}` : '<div class="empty">No spend</div>';
+
+  // ---------- B2B (Wayfair Professional)
+  const b2b = m.b2bOk && S.platform !== 'amz' ? table('ab2b', [{ k: 'k', l: 'Wayfair audience', f: v => `<b>${esc(v)}</b>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: n0 }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => ratio(v) }], [{ k: 'Consumers (wayfair.com)', ...m.b2b.con }, { k: 'Professional (B2B)', ...m.b2b.pro }]) : '';
+
+  const planHtml = acts.length ? `<div class="plan">${acts.map(r => `<div class="plan-row p${r.pri}"><div class="plan-when"><span class="tag ${r.pri === 1 ? 'bad' : r.pri === 2 ? 'warn' : ''}">${r.pri === 1 ? 'Do now' : r.pri === 2 ? 'This week' : 'Test / watch'}</span>${chTag2(r.ch)}</div><div class="plan-body"><b>${esc(r.title)}</b><p>${r.body}</p>${r.items.length ? `<div class="plan-skus">${r.items.slice(0, 15).map(k => `<span>${esc(k)}</span>`).join('')}${r.items.length > 15 ? `<span>+${r.items.length - 15} more</span>` : ''}</div>` : ''}</div><div class="plan-num">${r.impact ? `<small>Impact</small><b>${esc(r.impact)}</b>` : ''}</div></div>`).join('')}</div>` : '<div class="empty">Nothing to change — every campaign is within target.</div>';
+
   return `${pageHead('Advertising')}
-  <div class="grid g-kpi">
-    ${kpi('Ad Spend', usd(ad.spend, 0), `${delta(ad.spend, pa.spend, { invert: true })} ${vsPrev()}`, '', sp('spend', 0))}
-    ${kpi('Ad Sales' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), usd(ad.sales), `${delta(ad.sales, pa.sales)} 14-day attributed, retail price`, 'Retail sales Wayfair attributes to ad clicks/views within 14 days.', sp('sales', 2))}
-    ${kpi('ROAS' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), roas == null ? '—' : roas.toFixed(1) + '×', `${delta(roas, proas)} ${vsPrev()}`, 'Ad sales ÷ ad spend', sp('roas', 4, true))}
-    ${kpi('ACoS' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), pct(ad.sales ? ad.spend / ad.sales : null, 1), 'Ad spend ÷ ad sales', '', sp('acos', 4, true))}
-    ${kpi('TACoS', pct(a.rev ? ad.spend / a.rev : null, 1), `${delta(a.rev ? ad.spend / a.rev : null, prev.a.rev ? pa.spend / prev.a.rev : null, { pp: true, invert: true })} ${vsPrev()}`, 'Total ad spend ÷ total Revenue (base cost)', sp('tacos', 4, true))}
-    ${kpi('Clicks' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), n0(ad.clicks), `CTR ${pct(ad.impr ? ad.clicks / ad.impr : null, 2)} · ${n0(ad.impr)} impressions`, '', sp('clicks', 1))}
-    ${kpi('CPC' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), ad.clicks ? usd(ad.spend / ad.clicks, 2) : '—', `${delta(ad.clicks ? ad.spend / ad.clicks : null, pa.clicks ? pa.spend / pa.clicks : null, { invert: true })} ${vsPrev()}`, '', sp('cpc', 0))}
-    ${kpi('Ad Orders' + (((D.amz && D.amz.ads && D.amz.ads.daily) || []).length ? '' : ' <span class="tag only wf mini">WF</span>'), n0(ad.orders), `${n0(ad.units)} units attributed`, '', sp('orders', 3))}
-  </div>
-  ${amzNote}
+  ${kp}
+  ${cov}
+  ${card('Optimization plan', `Generated from ${m.chs.map(chName).join(' + ')} ad data, unit economics (break-even ACoS per SKU), stock cover and Amazon's budget & bid suggestions · ${acts.length} action${acts.length === 1 ? '' : 's'} · most money at stake first`, planHtml)}
+  <section class="card glass insights"><div class="card-head"><div><h3>Key insights</h3><p class="sub">What the ad data says for the selected period</p></div></div><ul>${ins.map(x => `<li>${x}</li>`).join('') || '<li>No ad activity in the period.</li>'}</ul></section>
+  ${card('Channel scorecard', 'Same metrics for both channels side by side. Red ACoS = above break-even (ads lose money on those sales).', score)}
   ${card('Spend, ad sales and efficiency', `Bars = ad spend · line = attributed ad sales · dashed = ${ADM[S.adm || 'tacos'][0]} · by ${autoGran(f, t)}`, combo3(abk, { bar: { k: 'spend', name: 'Ad spend', short: 'Spend', axis: usdK, lbl: v => usd(v), color: C[0] }, line: { k: 'sales', name: 'Ad sales (14-day)', short: 'Ad sales', axis: usdK, color: C[2] }, dash: { k: S.adm || 'tacos', name: ADM[S.adm || 'tacos'][0], fmt: ADM[S.adm || 'tacos'][1], color: C[4], min: ADM[S.adm || 'tacos'][2] }, tip: adTip }), { actions: `<div class="btn-row">${Object.entries(ADM).map(([k, [l]]) => `<button class="view-toggle" data-adm="${k}" aria-pressed="${(S.adm || 'tacos') === k}">${esc(l.split(' ')[0])}</button>`).join('')}</div>${granBtns()}`, cls: 'big-chart' })}
   <div class="grid g-2">
-    ${card('Traffic ' + chOnly('wf'), 'Bars = clicks · line = impressions · dashed = CTR', combo3(abk, { bar: { k: 'clicks', name: 'Clicks', axis: n0, color: C[1] }, line: { k: 'impr', name: 'Impressions', short: 'Impr.', axis: v => v >= 1000 ? nf1.format(v / 1000) + 'k' : n0(v), color: C[3] }, dash: { k: 'ctr', name: 'CTR', fmt: v => pct(v, 1), color: C[4], min: 0.002 }, tip: adTip }, { h: 320, w: CW('half') }))}
-    ${card('Cost per click and conversion ' + chOnly('wf'), 'Bars = ad orders · line = CPC · dashed = ROAS', combo3(abk, { bar: { k: 'orders', name: 'Ad orders', short: 'Orders', axis: n0, color: C[3] }, line: { k: 'cpc', name: 'CPC', axis: v => usd(v, 2), color: C[0] }, dash: { k: 'roas', name: 'ROAS', fmt: v => v.toFixed(1) + '×', color: C[4], min: 1 }, tip: adTip }, { h: 320, w: CW('half') }))}
+    ${card('Ad funnel', 'Impressions → clicks → orders per channel (bar length on a compressed scale) · CTR and CVR between steps', adsFunnel(m))}
+    ${card('Spend vs ACoS', 'Each dot is a Wayfair listing or an Amazon keyword/target. Right + high = expensive and unprofitable → fix first. Right + low = scale.', scat)}
   </div>
-  ${card((amzApi ? 'Wayfair campaigns ' : 'Campaigns ') + chOnly('wf'), '', table('camps', [{ k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.id)} · ${esc(r.status || '')}${r.cap ? ' · $' + r.cap + '/day cap' : ''}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: v => n0(v) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }], camps, { def: { k: 'spend', d: 'desc' } }))}
-  ${S.platform !== 'wf' && amzApi ? card('Amazon campaigns ' + chOnly('amz'), 'Sponsored Products · last 30 days from the Amazon Ads API (14-day attribution) · ' + ((D.amz.ads.camps || []).length) + ' campaigns', table('acamps', [{ k: 'name', l: 'Campaign', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.state)}${r.delivery && !/ENABLED$/.test(r.delivery) ? ' · <b style="color:var(--crit-ink)">' + esc(r.delivery.replace(/_/g, ' ').toLowerCase()) + '</b>' : ''} · $${r.budget}/day · since ${dLong(r.start)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'impr', l: 'Impr.', num: true, f: v => n0(v) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'ctr', l: 'CTR', num: true, f: v => pct(v, 2) }, { k: 'cpc', l: 'CPC', num: true, f: v => v == null ? '—' : usd(v, 2) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'acos', l: 'ACoS', num: true, f: v => pct(v, 1) }],
-    [...new Map((D.amz.ads.camps || []).map(c => [String(c[0]), c])).values()].map(c => ({ id: c[0], name: c[1], state: c[2], delivery: c[3], start: c[4], budget: c[5], impr: c[6], clicks: c[7], spend: c[8], sales: c[9], orders: c[10], ctr: c[6] ? c[7] / c[6] : null, cpc: c[7] ? c[8] / c[7] : null, roas: c[8] ? c[9] / c[8] : null, acos: c[9] ? c[8] / c[9] : null })), { def: { k: 'spend', d: 'desc' } })) : ''}
-  ${card('Spend by listing → SKU ' + chOnly('wf'), 'From the Wayfair SKU report; each listing\'s spend is split across its child SKUs by net revenue (equal split if the listing had no sales)', listings.length ? table('lst', [{ k: 'name', l: 'Listing', f: (v, r) => `<b>${esc(v)}</b><div class="sub">${esc(r.lid)}</div>` }, { k: 'spend', l: 'Spend', num: true, f: v => usd(v, 2) }, { k: 'clicks', l: 'Clicks', num: true, f: v => n0(v) }, { k: 'orders', l: 'Orders', num: true }, { k: 'sales', l: 'Ad sales', num: true, f: v => usd(v) }, { k: 'roas', l: 'ROAS', num: true, f: v => v == null ? '—' : v.toFixed(1) + '×' }, { k: 'alloc', l: 'Allocated to SKUs', nosort: true }], listings, { def: { k: 'spend', d: 'desc' } }) : '<div class="empty">SKU-level ad data arrives with the next daily sync.</div>')}`;
+  <div class="grid g-2">
+    ${card('Traffic', 'Bars = clicks · line = impressions · dashed = CTR', combo3(abk, { bar: { k: 'clicks', name: 'Clicks', axis: n0, color: C[1] }, line: { k: 'impr', name: 'Impressions', short: 'Impr.', axis: v => v >= 1000 ? nf1.format(v / 1000) + 'k' : n0(v), color: C[3] }, dash: { k: 'ctr', name: 'CTR', fmt: v => pct(v, 1), color: C[4], min: 0.002 }, tip: adTip }, { h: 320, w: CW('half') }))}
+    ${card('Cost per click and conversion', 'Bars = ad orders · line = CPC · dashed = ROAS', combo3(abk, { bar: { k: 'orders', name: 'Ad orders', short: 'Orders', axis: n0, color: C[3] }, line: { k: 'cpc', name: 'CPC', axis: v => usd(v, 2), color: C[0] }, dash: { k: 'roas', name: 'ROAS', fmt: v => v.toFixed(1) + '×', color: C[4], min: 1 }, tip: adTip }, { h: 320, w: CW('half') }))}
+  </div>
+  ${card('Campaigns', `${both ? 'Both channels · ' : ''}Budget used = average daily spend ÷ daily budget; capped = days spending ≥95% of it. Read = status against break-even ACoS.`, campTbl)}
+  ${card('Listings & SKUs — paid vs organic', 'Ad share = ad-attributed units ÷ all units sold on that channel. Contribution after ads = contribution before ads (all sales) − ad spend. Stock cover at the 30-day sales pace (shared CastleGate stock). Class rank from Wayfair (lower = better).', prodTbl)}
+  ${amzOn ? `<div class="grid g-2">
+    ${card('Amazon placements ' + chOnly('amz'), 'Where Amazon showed the ads · bar = spend · hover for full metrics', plCard)}
+    ${card('Day of week', 'Spend and ROAS by weekday — look for days that consistently waste budget (needs 4+ weeks to be reliable)', dowH)}
+  </div>
+  ${card('Amazon keywords & targets ' + chOnly('amz'), `Live bids with Amazon's suggested range, top-of-search impression share and the action for each. Target ACoS ${pct(m.be.amz != null ? m.be.amz * 0.75 : null, 0)} (75% of break-even ${pct(m.be.amz, 0)}). "No order" verdicts start at ${m.thr.amz || 15} clicks.`, tgTbl)}
+  ${card('Amazon search terms ' + chOnly('amz'), `What shoppers actually typed · harvest converting terms into Exact, add non-converting ones as negatives · ${n0(m.st.length)} terms`, stTbl + (m.st.length > 40 ? `<div class="btn-row" style="margin-top:10px"><button class="view-toggle" data-act="stAll">${S.stAll ? 'Show top 40' : 'Show all ' + n0(m.st.length)}</button></div>` : ''))}` : card('Day of week', 'Spend and ROAS by weekday', dowH)}
+  ${b2b ? card('Wayfair consumer vs Professional (B2B) ' + chOnly('wf'), 'The Wayfair report splits every campaign between wayfair.com shoppers and Wayfair Professional (trade) buyers', b2b) : ''}`;
 }
 
 // ================= Incidents & Returns: case verification =================
@@ -1644,7 +1914,7 @@ $('#view').addEventListener('click', e => {
   const am = e.target.closest('[data-adm]'); if (am) { S.adm = am.dataset.adm; rerender(); return; }
   const cp = e.target.closest('[data-copy]'); if (cp) { const t = cp.parentElement.querySelector('textarea'); try { navigator.clipboard.writeText(t.value); cp.textContent = 'Copied'; } catch (er) { t.select(); } return; }
   const go = e.target.closest('[data-goto]'); if (go) { setTab(go.dataset.goto); return; }
-  const b = e.target.closest('[data-act]'); if (b) { if (b.dataset.act === 'kpiAll') S.kpiAll = !S.kpiAll; if (b.dataset.act === 'hideZero') S.hideZero = !S.hideZero; rerender(); return; }
+  const b = e.target.closest('[data-act]'); if (b) { if (b.dataset.act === 'kpiAll') S.kpiAll = !S.kpiAll; if (b.dataset.act === 'hideZero') S.hideZero = !S.hideZero; if (b.dataset.act === 'stAll') S.stAll = !S.stAll; rerender(); return; }
   const c = e.target.closest('[data-unchip]'); if (c) { const k = c.dataset.unchip; if (k === 'platform') S.platform = 'all'; else if (k === 'tt') S.incTT = false; else S.f[k].delete(c.dataset.v); rerender(); }
 });
 const openFilters = on => { document.body.classList.toggle('filters-open', on); $('#filterBtn').setAttribute('aria-expanded', on); };

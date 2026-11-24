@@ -462,3 +462,12 @@ td.ck.na{color:var(--muted)}
 .cphotos{display:flex;gap:6px;overflow-x:auto;margin:10px 0 2px;padding-bottom:4px}
 .cphotos a{flex:none;cursor:zoom-in}.cphotos img{height:96px;width:96px;object-fit:cover;border-radius:10px;background:var(--glass-thin);border:1px solid var(--stroke);display:block}
 .cphotos img.err{opacity:.3}
+
+/* Ads funnel */
+.afun{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
+.afun-col{display:flex;flex-direction:column;gap:6px}
+.afun-h{font-weight:750;font-size:14px;margin-bottom:4px}
+.afun-bar{display:flex;justify-content:space-between;align-items:center;gap:8px;min-width:120px;padding:8px 10px;border-radius:8px;color:#fff;font-size:12.5px}
+.afun-bar b{font-size:14px}
+.afun-rate{font-size:12px;color:var(--ink2);padding-left:6px}.afun-rate b{color:var(--ink)}
+.afun-foot{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12px;color:var(--ink2)}.afun-foot b{color:var(--ink)}
