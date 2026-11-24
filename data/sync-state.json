@@ -1,1 +1,1 @@
-{"hourly":1795525875165,"six":0,"daily":1795464032103,"errors":null}
+{"hourly":1795525875165,"six":1795527149452,"daily":1795464032103,"errors":{"amazon-ads":"425 https://advertising-api.amazon.com/reporting/reports {\"code\":\"425\",\"detail\":\"The Request is a duplicate of : 698b8e82-442f-4c92-9983-bedac48a6cef\"}"}}
