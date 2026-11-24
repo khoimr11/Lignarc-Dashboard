@@ -236,13 +236,25 @@ async function amazonAds(days) {
   if (!prof) throw new Error('no Amazon Ads profile');
   if (PROBE) return { profiles: profiles.map(p => [p.profileId, p.countryCode, p.accountInfo && p.accountInfo.type, p.accountInfo && p.accountInfo.name]) };
   const HS = { ...H, 'Amazon-Advertising-API-Scope': String(prof.profileId) };
-  const end = new Date(Date.now() - 864e5), start = new Date(end - (days - 1) * 864e5);
-  const rep = await http(base + '/reporting/reports', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' }, body: JSON.stringify({
-    name: 'lignarc-sp-daily-' + day(end), startDate: day(start), endDate: day(end),
-    configuration: { adProduct: 'SPONSORED_PRODUCTS', groupBy: ['campaign'], reportTypeId: 'spCampaigns', timeUnit: 'DAILY', format: 'GZIP_JSON',
-      columns: ['date', 'campaignId', 'campaignName', 'campaignStatus', 'campaignBudgetAmount', 'impressions', 'clicks', 'cost', 'sales14d', 'purchases14d', 'unitsSoldClicks14d'] } }) });
-  let st = rep; for (let i = 0; i < 60 && st.status !== 'COMPLETED'; i++) { await sleep(15000); st = await http(base + '/reporting/reports/' + rep.reportId, { headers: HS }); if (st.status === 'FAILED') throw new Error('Ads report failed: ' + st.failureReason); }
-  if (st.status !== 'COMPLETED') throw new Error('Ads report not ready in time');
+  // Amazon v3 reports often take 15–45 min: request once, then pick the result up on a later 15-minute run
+  const P = (globalThis.SYNC_STATE = globalThis.SYNC_STATE || {}), pend = P.adsReport;
+  let st = null;
+  if (pend && Date.now() - pend.at < 6 * 3600e3) {
+    st = await http(base + '/reporting/reports/' + pend.id, { headers: HS });
+    if (st.status === 'FAILED') { delete P.adsReport; throw new Error('Ads report failed: ' + (st.failureReason || '')); }
+    if (st.status !== 'COMPLETED') return { pending: true, status: st.status };
+    delete P.adsReport;
+  } else {
+    const end = new Date(Date.now() - 864e5), start = new Date(end - (days - 1) * 864e5);
+    const rep = await http(base + '/reporting/reports', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' }, body: JSON.stringify({
+      name: 'lignarc-sp-daily-' + day(end) + '-' + Date.now(), startDate: day(start), endDate: day(end),
+      configuration: { adProduct: 'SPONSORED_PRODUCTS', groupBy: ['campaign'], reportTypeId: 'spCampaigns', timeUnit: 'DAILY', format: 'GZIP_JSON',
+        columns: ['date', 'campaignId', 'campaignName', 'campaignStatus', 'campaignBudgetAmount', 'impressions', 'clicks', 'cost', 'sales14d', 'purchases14d', 'unitsSoldClicks14d'] } }) });
+    P.adsReport = { id: rep.reportId, at: Date.now() };
+    for (let i = 0; i < 16; i++) { await sleep(15000); st = await http(base + '/reporting/reports/' + rep.reportId, { headers: HS }); if (st.status === 'COMPLETED' || st.status === 'FAILED') break; }
+    if (!st || st.status !== 'COMPLETED') return { pending: true, status: st && st.status };
+    delete P.adsReport;
+  }
   const gz = Buffer.from(await (await fetch(st.url)).arrayBuffer()); const rows = JSON.parse(zlib.gunzipSync(gz).toString());
   const camps = new Map(), byDay = new Map();
   for (const r of rows) {
@@ -288,6 +300,7 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
 (async () => {
   // Tiered schedule: the workflow runs every 15 min; heavier jobs only when their interval has passed (state in data/sync-state.json).
   const ST_FILE = 'data/sync-state.json', st = fs.existsSync(ST_FILE) ? JSON.parse(fs.readFileSync(ST_FILE, 'utf8')) : {}, now = Date.now();
+  globalThis.SYNC_STATE = st;
   const due = (k, min) => E.SYNC_ALL === '1' || !st[k] || now - st[k] >= min * 60e3 - 90e3;
   const T = { hourly: due('hourly', 60), six: due('six', 360), daily: due('daily', 1440) };
   log('tiers', JSON.stringify(T));
@@ -297,11 +310,11 @@ async function aes(dk) { return C.subtle.importKey('raw', dk, 'AES-GCM', false, 
   if (SP && T.hourly) jobs.push(['amazon-finances', () => amazonFinances(T.daily ? +(E.AMZ_FIN_DAYS || 400) : 60)]);
   if (SP && T.six) jobs.push(['amazon-traffic', () => amazonTraffic(+(E.AMZ_TRAFFIC_DAYS || 60))], ['amazon-catalog', () => amazonCatalog(ASINS)], ['amazon-feedback', () => amazonFeedback(ASINS)], ['amazon-listings', () => amazonListings(ASINS[0] || 'B0HJQQ3MY4')]);
   if (SP && T.hourly) jobs.push(['amazon-returns', () => amazonReturns(T.daily ? 180 : 59)]);
-  if (T.six && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_REFRESH_TOKEN') && (E.AMZ_ADS_CLIENT_SECRET || E.AMZ_ADS_USE_SP_SECRET === '1')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
+  if ((T.six || st.adsReport) && has('AMZ_ADS_CLIENT_ID', 'AMZ_ADS_REFRESH_TOKEN') && (E.AMZ_ADS_CLIENT_SECRET || E.AMZ_ADS_USE_SP_SECRET === '1')) jobs.push(['amazon-ads', () => amazonAds(+(E.AMZ_ADS_DAYS || 30))]);
   if (has('WF_CLIENT_ID', 'WF_CLIENT_SECRET')) { E.WF_SKIP = [T.hourly ? '' : 'inb', T.six ? '' : 'ads,adsSku'].filter(Boolean).join(','); jobs.push(['wayfair', wayfair]); }
   if (!jobs.length) { log('No API secrets configured — nothing to do.'); return; }
   const payloads = [], errors = {};
-  for (const [name, fn] of jobs) { try { const p = await fn(); log(name, 'ok', PROBE ? JSON.stringify(p).slice(0, 4000) : ''); if (!PROBE) payloads.push(p); } catch (e) { errors[name] = e.message.slice(0, 300); log(name, 'FAILED', e.message); } }
+  for (const [name, fn] of jobs) { try { const p = await fn(); if (p && p.pending) { log(name, 'report pending (' + p.status + ') — picked up next run'); continue; } log(name, 'ok', PROBE ? JSON.stringify(p).slice(0, 4000) : ''); if (!PROBE) payloads.push(p); } catch (e) { errors[name] = e.message.slice(0, 300); log(name, 'FAILED', e.message); } }
   if (PROBE || !payloads.length) { if (Object.keys(errors).length && !payloads.length && !PROBE) process.exitCode = 1; return; }
   if (!E.LG_DK) throw new Error('LG_DK secret missing');
   const dk = ub(E.LG_DK), file = JSON.parse(fs.readFileSync(FILE, 'utf8'));
