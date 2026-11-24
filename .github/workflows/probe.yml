@@ -8,7 +8,7 @@ concurrency: { group: data-sync, cancel-in-progress: false }
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,7 +21,7 @@ jobs:
           AMZ_SP_CLIENT_SECRET: ${{ secrets.AMZ_SP_CLIENT_SECRET }}
           AMZ_SP_REFRESH_TOKEN: ${{ secrets.AMZ_SP_REFRESH_TOKEN }}
           LG_DK: ${{ secrets.LG_DK }}
-        run: node scripts/${PROBE_SCRIPT:-listing-probe.mjs} > probe.txt 2>&1 || true
+        run: S=$(grep -o "[a-z-]*\.mjs" .github/probe-trigger || true); node scripts/${S:-listing-probe.mjs} > probe.txt 2>&1 || true
       - name: Encrypt and commit
         env:
           LG_DK: ${{ secrets.LG_DK }}
