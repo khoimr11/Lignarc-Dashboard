@@ -20,17 +20,17 @@ async function amazon() {
   const prof = profiles.find(p => p.countryCode === 'US' && p.accountInfo.type === 'seller');
   const HS = { ...H, 'Amazon-Advertising-API-Scope': String(prof.profileId) };
   const ent = async (name, path, type, body = {}) => { try { const j = await http(base + path, { method: 'POST', headers: { ...HS, 'Content-Type': type, Accept: type }, body: JSON.stringify(body) }); out('ENTITY', name, JSON.stringify(j).slice(0, 1500)); return j; } catch (e) { out('ENTITY', name, 'ERR', e.message); } };
-  const camps = await ent('campaigns', '/sp/campaigns/list', 'application/vnd.spCampaign.v3+json', { includeExtendedDataFields: true });
-  const ag = await ent('adGroups', '/sp/adGroups/list', 'application/vnd.spAdGroup.v3+json', { includeExtendedDataFields: true });
-  const kw = await ent('keywords', '/sp/keywords/list', 'application/vnd.spKeyword.v3+json', { includeExtendedDataFields: true });
-  await ent('targets', '/sp/targets/list', 'application/vnd.spTargetingClause.v3+json', { includeExtendedDataFields: true });
-  await ent('negKeywords', '/sp/negativeKeywords/list', 'application/vnd.spNegativeKeyword.v3+json', {});
-  await ent('campNegKeywords', '/sp/campaignNegativeKeywords/list', 'application/vnd.spCampaignNegativeKeyword.v3+json', {});
-  await ent('negTargets', '/sp/negativeTargets/list', 'application/vnd.spNegativeTargetingClause.v3+json', {});
-  await ent('productAds', '/sp/productAds/list', 'application/vnd.spProductAd.v3+json', { includeExtendedDataFields: true });
+  const SKIPENT = true; const camps = SKIPENT ? null : await ent('campaigns', '/sp/campaigns/list', 'application/vnd.spCampaign.v3+json', { includeExtendedDataFields: true });
+  const ag = SKIPENT ? null : await ent('adGroups', '/sp/adGroups/list', 'application/vnd.spAdGroup.v3+json', { includeExtendedDataFields: true });
+  const kw = SKIPENT ? null : await ent('keywords', '/sp/keywords/list', 'application/vnd.spKeyword.v3+json', { includeExtendedDataFields: true });
+  if (!SKIPENT) await ent('targets', '/sp/targets/list', 'application/vnd.spTargetingClause.v3+json', { includeExtendedDataFields: true });
+  if (!SKIPENT) await ent('negKeywords', '/sp/negativeKeywords/list', 'application/vnd.spNegativeKeyword.v3+json', {});
+  if (!SKIPENT) await ent('campNegKeywords', '/sp/campaignNegativeKeywords/list', 'application/vnd.spCampaignNegativeKeyword.v3+json', {});
+  if (!SKIPENT) await ent('negTargets', '/sp/negativeTargets/list', 'application/vnd.spNegativeTargetingClause.v3+json', {});
+  if (!SKIPENT) await ent('productAds', '/sp/productAds/list', 'application/vnd.spProductAd.v3+json', { includeExtendedDataFields: true });
   const ids = ((camps && camps.campaigns) || []).map(c => c.campaignId);
-  try { out('BUDGET_USAGE', JSON.stringify(await http(base + '/sp/campaigns/budget/usage', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignIds: ids }) })).slice(0, 1500)); } catch (e) { out('BUDGET_USAGE ERR', e.message); }
-  try { out('BUDGET_RECS', JSON.stringify(await http(base + '/sp/campaigns/budgetRecommendations', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.budgetrecommendation.v3+json', Accept: 'application/vnd.budgetrecommendation.v3+json' }, body: JSON.stringify({ campaignIds: ids }) })).slice(0, 2500)); } catch (e) { out('BUDGET_RECS ERR', e.message); }
+  if (!SKIPENT) try { out('BUDGET_USAGE', JSON.stringify(await http(base + '/sp/campaigns/budget/usage', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignIds: ids }) })).slice(0, 1500)); } catch (e) { out('BUDGET_USAGE ERR', e.message); }
+  if (!SKIPENT) try { out('BUDGET_RECS', JSON.stringify(await http(base + '/sp/campaigns/budgetRecommendations', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.budgetrecommendation.v3+json', Accept: 'application/vnd.budgetrecommendation.v3+json' }, body: JSON.stringify({ campaignIds: ids }) })).slice(0, 2500)); } catch (e) { out('BUDGET_RECS ERR', e.message); }
   const k0 = ((kw && kw.keywords) || [])[0], g0 = ((ag && ag.adGroups) || []).find(g => k0 && g.adGroupId === k0.adGroupId);
   if (k0) try { out('BID_RECS', JSON.stringify(await http(base + '/sp/targets/bid/recommendations', { method: 'POST', headers: { ...HS, 'Content-Type': 'application/vnd.spthemebasedbidrecommendation.v4+json', Accept: 'application/vnd.spthemebasedbidrecommendation.v4+json' }, body: JSON.stringify({ campaignId: k0.campaignId, adGroupId: k0.adGroupId, recommendationType: 'BIDS_FOR_EXISTING_AD_GROUP', targetingExpressions: [{ type: 'KEYWORD_' + k0.matchType + '_MATCH', value: k0.keywordText }] }) })).slice(0, 2500)); } catch (e) { out('BID_RECS ERR', e.message); }
 
@@ -49,7 +49,7 @@ async function amazon() {
     catch (e) { const m = /duplicate of\s*:\s*([0-9a-f-]{36})/i.exec(e.message); if (m) ids2[k] = m[1]; out('REPORT', k, 'ERR', e.message); }
   }
   const t0 = Date.now();
-  while (Object.keys(ids2).length && Date.now() - t0 < 13 * 60e3) {
+  while (Object.keys(ids2).length && Date.now() - t0 < 18 * 60e3) {
     await sleep(20000);
     for (const [k, id] of Object.entries(ids2)) {
       const st = await http(base + '/reporting/reports/' + id, { headers: HS });
@@ -63,10 +63,10 @@ async function amazon() {
 async function wayfair() {
   const j = await http('https://sso.auth.wayfair.com/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant_type: 'client_credentials', client_id: E.WF_CLIENT_ID, client_secret: E.WF_CLIENT_SECRET }) });
   const H = { Authorization: 'Bearer ' + j.access_token, 'content-type': 'application/json' }, A = 'https://api.wayfair.io/advertising/v1';
-  for (const p of ['/campaigns?supplierId=467016', '/campaigns', '/keywords?supplierId=467016', '/products?supplierId=467016', '/reports/types']) { try { out('WF GET', p, JSON.stringify(await http(A + p, { headers: H })).slice(0, 1200)); } catch (e) { out('WF GET', p, 'ERR', e.message.slice(0, 400)); } }
+  for (const p of []) { try { out('WF GET', p, JSON.stringify(await http(A + p, { headers: H })).slice(0, 1200)); } catch (e) { out('WF GET', p, 'ERR', e.message.slice(0, 400)); } }
   const end = day(new Date(Date.now() - 864e5)), start = day(new Date(Date.now() - 8 * 864e5));
   const ids = {};
-  for (const t of ['KEYWORD_REPORT', 'SEARCH_TERM_REPORT', 'SEARCH_QUERY_REPORT', 'PLACEMENT_REPORT', 'PRODUCT_REPORT', 'SKU_REPORT', 'CAMPAIGN_REPORT', 'TARGETING_REPORT']) {
+  for (const t of ['KEYWORD_PRODUCT_REPORT', 'PRODUCT_RANK_REPORT', 'LISTING_REPORT']) {
     try { const r = await http(A + '/reports', { method: 'POST', headers: H, body: JSON.stringify({ name: 'probe-' + t + '-' + Date.now(), reportType: t, groupBy: 'DAY', program: 'WSP', fileType: 'CSV', filters: { startDate: start, endDate: end }, attributionWindow: 14, supplierId: 467016 }) }); ids[t] = r.id || r.reportId; out('WF REPORT', t, 'created'); }
     catch (e) { out('WF REPORT', t, 'ERR', e.message.slice(0, 400)); }
   }
@@ -75,7 +75,7 @@ async function wayfair() {
     await sleep(10000);
     for (const [t, id] of Object.entries(ids)) {
       try { const st = await http(A + '/reports?reportId=' + encodeURIComponent(id), { headers: H });
-        if (st.status === 'COMPLETED' && st.url) { const txt = (await (await fetch(st.url)).text()).replace(/^﻿/, ''); const L = txt.split('\n'); out('WF REPORT', t, 'lines', L.length, '\n' + L.slice(0, 4).join('\n')); delete ids[t]; }
+        if (st.status === 'COMPLETED' && st.url) { const txt = (await (await fetch(st.url)).text()).replace(/^﻿/, ''); const L = txt.split('\n'); out('WF REPORT', t, 'lines', L.length, '\n' + L.slice(0, 6).join('\n')); delete ids[t]; }
         else if (/FAIL/i.test(st.status || '')) { out('WF REPORT', t, 'FAILED', JSON.stringify(st).slice(0, 300)); delete ids[t]; } } catch (e) { out('WF REPORT', t, 'poll ERR', e.message.slice(0, 200)); delete ids[t]; }
     }
   }
