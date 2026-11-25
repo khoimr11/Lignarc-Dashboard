@@ -15,7 +15,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Lignarc">
-<link rel="stylesheet" href="assets/styles.css?v=20">
+<link rel="stylesheet" href="assets/styles.css?v=21">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
@@ -47,6 +47,7 @@
       <span class="updated" id="updated"></span>
       <button class="icon-btn install-btn" id="installBtn" title="Install app" aria-label="Install app" hidden><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg><span>Install app</span></button>
       <button class="icon-btn filter-btn" id="filterBtn" aria-label="Filters" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg><b id="filterCount"></b></button>
+      <button class="icon-btn lang-btn" id="langBtn" title="Switch to Tiếng Việt" aria-label="Switch to Tiếng Việt" data-notr><span>EN</span></button>
       <button class="icon-btn" id="themeBtn" title="Light / dark" aria-label="Light / dark"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></button>
       <button class="icon-btn" id="logoutBtn" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg></button>
     </div>
@@ -73,7 +74,9 @@
 </div>
 
 <div id="tip" class="tip" role="tooltip" hidden></div>
-<script src="assets/app.js?v=20"></script>
+<script src="assets/app.js?v=21"></script>
+<script src="assets/i18n-vi.js?v=1"></script>
+<script src="assets/i18n.js?v=1"></script>
 <script>
 // Installable app (Chrome / Edge "Install" + Add to Home Screen)
 if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
