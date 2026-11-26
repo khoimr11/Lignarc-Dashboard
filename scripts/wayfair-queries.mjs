@@ -122,7 +122,7 @@ export default async function wayfair({ gql, http, tok }) {
     const pos = [...new Set([...seen.values()].map(r => r[0]))], chan = new Map();
     const Q_PO = `query($p: [String!], $h: Boolean){ getCastleGatePurchaseOrders(poNumbers: $p, hasResponse: $h, limit: 100) { poNumber salesChannelName orderType } }`;
     const take = L => { for (const o of L || []) if (o && o.poNumber && o.salesChannelName != null) chan.set(o.poNumber, [o.salesChannelName, o.orderType]); };
-    for (let i = 0; i < pos.length; i += 25) { for (const h of [false, true]) { try { const d = await q(ORDER_API, Q_PO, { p: pos.slice(i, i + 25), h }); take(d.getCastleGatePurchaseOrders); } catch (e) { console.log('  wayfair channel batch', e.message.slice(0, 120)); } } await sleep(200); }
+    for (let i = 0; i < pos.length; i += 25) { for (const h of [false]) { try { const d = await q(ORDER_API, Q_PO, { p: pos.slice(i, i + 25), h }); take(d.getCastleGatePurchaseOrders); } catch (e) { console.log('  wayfair channel batch', e.message.slice(0, 120)); } } await sleep(200); }
     // anything the batch call did not return: one PO at a time
     for (const po of pos.filter(p => !chan.has(p))) { for (const h of [false, true]) { if (chan.has(po)) break; try { const d = await q(ORDER_API, Q_PO, { p: [po], h }); take(d.getCastleGatePurchaseOrders); } catch (e) { } } await sleep(120); }
     const miss = pos.filter(p => !chan.has(p));

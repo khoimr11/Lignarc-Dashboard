@@ -1,7 +1,0 @@
-const E = process.env, P = (...a) => console.log(...a);
-const http = async (u, o) => { const r = await fetch(u, o); return r.json(); };
-const j = await http('https://sso.auth.wayfair.com/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant_type: 'client_credentials', client_id: E.WF_CLIENT_ID, client_secret: E.WF_CLIENT_SECRET }) });
-const gql = (url, query, variables) => http(url, { method: 'POST', headers: { Authorization: 'Bearer ' + j.access_token, 'content-type': 'application/json' }, body: JSON.stringify({ query, variables }) });
-const O = 'https://api.wayfair.io/v1/supplier-order-api/graphql';
-for (const po of ['CA687743831', 'CS695463627', 'CS695474408']) for (const h of [false, true]) { const r = await gql(O, `query($p: [String!], $h: Boolean){ getCastleGatePurchaseOrders(poNumbers: $p, hasResponse: $h, limit: 5) { poNumber salesChannelName orderType estimatedShipDate products { partNumber quantity isCancelled fillDate estShipDate } } }`, { p: [po], h }); P(po, h, JSON.stringify(r.errors ? r.errors[0].message : r.data).slice(0, 600)); }
-const r2 = await gql(O, `query($p: [String!]){ getCastleGatePurchaseOrders(poNumbers: $p, hasResponse: false, limit: 100) { poNumber } }`, { p: ['CA687743831', 'CS695463627', 'CS695474408', 'CS695495271', 'CS687225220'] }); P('batch', JSON.stringify(r2.errors || r2.data).slice(0, 500));
