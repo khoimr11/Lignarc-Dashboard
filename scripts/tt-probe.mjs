@@ -15,21 +15,29 @@ async function sel(url, name, depth, seen = new Set()) {
     if (u.kind === 'SCALAR' || u.kind === 'ENUM') parts.push(f.name); else if (u.kind === 'OBJECT' && depth > 0) { const s = await sel(url, u.name, depth - 1, new Set(seen)); if (s) parts.push(`${f.name} { ${s} }`); } }
   return parts.join(' ');
 }
-const QF = (await gql(O, '{__schema{queryType{fields{name args{name type{name kind ofType{name kind ofType{name kind}}}} type{name kind ofType{name kind ofType{name kind ofType{name kind}}}}}}}}')).data.__schema.queryType.fields;
-for (const n of ['getCastleGatePurchaseOrders', 'soCastlegateOrders', 'soCastlegateOrderItem', 'fulfillmentOrderDetails', 'fulfillmentOrderDetailsList', 'castlegatePurchaseOrders', 'soCastlegateRetailers'])
-  { const f = QF.find(x => x.name === n); if (f) P('Q', n, '->', unwrap(f.type).name, 'args', f.args.map(a => a.name + ':' + (unwrap(a.type).name)).join(', ')); }
-const inputT = async n => { const t = (await gql(O, `{__type(name:"${n}"){inputFields{name type{name kind ofType{name kind ofType{name kind}}}}}}`)).data?.__type; return t ? t.inputFields.map(f => f.name + ':' + unwrap(f.type).name).join(', ') : null; };
-for (const n of ['SoCastlegateOrderListFilters', 'FulfillmentOrderDetailsInput', 'FulfillmentOrderDetailsListInput', 'SoCastlegateOrderItemInput']) P('INPUT', n, await inputT(n));
-// getCastleGatePurchaseOrders on the order API: every scalar field
-const cgT = unwrap((QF.find(f => f.name === 'getCastleGatePurchaseOrders') || {}).type || {}).name;
-const s1 = await sel(O, cgT, 2); P('CG type', cgT, 'selection', s1.slice(0, 2500));
-const r1 = await gql(O, `{ getCastleGatePurchaseOrders(limit: 200, fromDate: "2026-10-15T00:00:00Z", sortOrder: ASC) { ${s1} } }`);
-if (r1.errors) P('CG errors', JSON.stringify(r1.errors).slice(0, 1500));
-const pos = r1.data?.getCastleGatePurchaseOrders || []; P('CG count', pos.length);
-const flat = (o, p = '', out = {}) => { for (const [k, v] of Object.entries(o || {})) { if (v && typeof v === 'object' && !Array.isArray(v)) flat(v, p + k + '.', out); else if (Array.isArray(v)) v.forEach((x, i) => x && typeof x === 'object' ? flat(x, p + k + '[' + i + '].', out) : out[p + k + '[' + i + ']'] = x); else out[p + k] = v; } return out; };
-const F = po => flat(pos.find(x => x.poNumber === po));
-for (const po of [TT[0], B2B[0], NORMAL[0]]) P('CG sample', po, JSON.stringify(pos.find(x => x.poNumber === po) || null).slice(0, 2500));
-const keys = new Set(pos.flatMap(o => Object.keys(flat(o))));
-for (const k of keys) { const st = v => JSON.stringify([...new Set(v.map(String))]); const tv = st(TT.map(p => F(p)[k])), nv = st(NORMAL.map(p => F(p)[k])), bv = st(B2B.map(p => F(p)[k])); if (tv !== nv || bv !== nv) P('DIFF', k, 'TT', tv, 'B2B', bv, 'N', nv); }
-// soCastlegateOrders / order item / fulfillment details
-for (const n of ['soCastlegateOrders', 'soCastlegateOrderItem', 'fulfillmentOrderDetails', 'fulfillmentOrderDetailsList']) { const f = QF.find(x => x.name === n); if (!f) continue; const tn = unwrap(f.type).name; P('TYPE', n, tn, (await sel(O, tn, 3)).slice(0, 2500)); }
+const PII = /name|address|city|postal|phone|email|customer(?!Order)|shipTo|billTo/i;
+const enumV = async n => { const t = (await gql(O, `{__type(name:"${n}"){enumValues{name}}}`)).data?.__type; return t ? (t.enumValues || []).map(e => e.name).join(', ') : null; };
+for (const n of ['SoCastlegateBillingType', 'SoCastlegateOrderSource', 'SoCastlegateOrderStatus']) P('ENUM', n, await enumV(n));
+const all = [...TT, ...B2B, ...NORMAL];
+// A) getCastleGatePurchaseOrders by PO numbers, non-PII fields only
+for (const sel1 of ['poNumber salesChannelName orderType source deliveryMethodCode storePrefix products { partNumber price event { id type name startDate endDate } customComment }', 'poNumber salesChannelName orderType source', 'poNumber salesChannelName orderType']) {
+  const r = await gql(O, `query($p: String){ getCastleGatePurchaseOrders(poNumbers: $p, limit: 50) { ${sel1} } }`, { p: all.join(',') });
+  if (r.errors) { P('CG-PO err', sel1.slice(0, 40), JSON.stringify(r.errors).slice(0, 400)); continue; }
+  for (const o of r.data.getCastleGatePurchaseOrders || []) P('CG-PO', TT.includes(o.poNumber) ? 'TT ' : B2B.includes(o.poNumber) ? 'B2B' : 'N  ', JSON.stringify(o).slice(0, 900));
+  break;
+}
+// B) soCastlegateOrders.orderListByFilters node, non-PII fields
+const SQ = (await gql(O, '{__type(name:"SoCastlegateOrderQuery"){fields{name args{name} type{name kind ofType{name kind ofType{name kind}}}}}}')).data?.__type;
+P('SoCastlegateOrderQuery', JSON.stringify((SQ && SQ.fields || []).map(f => [f.name, f.args.map(a => a.name), unwrap(f.type).name])));
+const lst = SQ && SQ.fields.find(f => f.name === 'orderListByFilters');
+if (lst) { const lt = unwrap(lst.type).name, LT = (await gql(O, `{__type(name:"${lt}"){fields{name type{name kind ofType{name kind ofType{name kind}}}}}}`)).data.__type, nodeName = unwrap(LT.fields.find(f => f.name === 'nodes').type).name;
+  const s2 = await sel(O, nodeName, 2); P('SO node', nodeName, s2.slice(0, 2000));
+  const s2np = s2.split(' ').filter(w => !PII.test(w)).join(' ');
+  for (const po of all) { const r = await gql(O, `query($f: SoCastlegateOrderListFilters!){ soCastlegateOrders { orderListByFilters(filters:$f){ nodes { ${s2} } } } }`, { f: { supplierId: '467016', purchaseOrderNumbers: po, page: 1, pageSize: 5 } });
+    if (r.errors) { P('SO err', po, JSON.stringify(r.errors).slice(0, 500)); continue; }
+    const nodes = r.data.soCastlegateOrders.orderListByFilters.nodes || [];
+    const strip = o => JSON.parse(JSON.stringify(o, (k, v) => PII.test(k) && typeof v !== 'object' ? undefined : v));
+    P('SO', TT.includes(po) ? 'TT ' : B2B.includes(po) ? 'B2B' : 'N  ', po, JSON.stringify(nodes.map(strip)).slice(0, 1800)); } }
+// C) fulfillment order list (multichannel) — just the retailer and billingType values
+const fr = await gql(O, `query($i: FulfillmentOrderDetailsListInput){ fulfillmentOrderDetailsList(orderDetailsListInput:$i){ pageInfo { totalItems } nodes { fulfillmentOrder { requestId billingType status retailer { name orderNumber } orderDate } } } }`, { i: { supplierId: 467016, pageSize: 20, page: 1 } });
+P('FO', JSON.stringify(fr.errors || fr.data).slice(0, 1500));
