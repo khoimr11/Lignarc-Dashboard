@@ -3,8 +3,21 @@
 (function () {
   const KEY = 'lg-lang', DICT = window.LG_VI || {};
   let lang = 'en'; try { lang = localStorage.getItem(KEY) || 'en'; } catch (e) {}
+  // Metrics stay in English for PICs and the BOD: Vietnamese metric terms in the dictionary are mapped back to the English metric name.
+  const METRIC = [
+    ['Biên lợi nhuận góp', 'Contribution Margin'], ['biên lợi nhuận góp', 'contribution margin'], ['Lợi nhuận góp trước QC', 'Contribution before Ads'], ['lợi nhuận góp trước QC', 'contribution before ads'], ['Lợi nhuận góp', 'Contribution'], ['lợi nhuận góp', 'contribution'],
+    ['Biên lợi nhuận', 'Margin'], ['biên lợi nhuận', 'margin'], ['Lãi sau QC', 'Profit after Ads'], ['lãi sau QC', 'profit after ads'], ['Lợi nhuận', 'Profit'], ['lợi nhuận', 'profit'],
+    ['Doanh thu thuần', 'Net Revenue'], ['doanh thu thuần', 'net revenue'], ['Doanh số thuần', 'Net Sales'], ['doanh số thuần', 'net sales'], ['Doanh thu', 'Revenue'], ['doanh thu', 'revenue'],
+    ['Chi tiêu QC', 'Ad Spend'], ['chi tiêu QC', 'ad spend'], ['Doanh số QC', 'Ad Sales'], ['doanh số QC', 'ad sales'], ['Đơn QC', 'Ad Orders'], ['đơn QC', 'ad orders'], ['Chi tiêu lãng phí', 'Wasted Spend'], ['chi tiêu lãng phí', 'wasted spend'],
+    ['Chi phí mỗi đơn QC', 'Cost per Ad Order'], ['Chi phí mỗi đơn', 'Cost per Order'], ['Giá trị đơn TB', 'AOV'], ['CPC tối đa còn lãi', 'Max profitable CPC'],
+    ['ACoS hòa vốn', 'Break-even ACoS'], ['CPA hòa vốn', 'Break-even CPA'], ['TACoS hòa vốn', 'Break-even TACoS'], ['ROAS hòa vốn', 'Break-even ROAS'], ['ACoS mục tiêu', 'Target ACoS'], ['Hòa vốn', 'Break-even'], ['hòa vốn', 'break-even'],
+    ['Giá vốn', 'COGS'], ['giá vốn', 'COGS'], ['Phí sàn', 'Platform Fees'], ['phí sàn', 'platform fees'], ['Lượt hiển thị', 'Impressions'], ['lượt hiển thị', 'impressions'], ['Tỷ lệ chuyển đổi', 'Conversion Rate'], ['tỷ lệ chuyển đổi', 'conversion rate'],
+    ['Số ngày tồn', 'Stock Cover'], ['Số ngày đủ hàng', 'Days of Cover'], ['Giá trị tồn kho', 'Stock Value'], ['Tỷ lệ sự cố', 'Incident Rate'], ['tỷ lệ sự cố', 'incident rate'], ['Tỷ lệ hoàn', 'Return Rate'], ['Tỷ lệ bán hết', 'Sell-through'], ['Tỷ lệ đánh giá', 'Review Rate'],
+    ['Chỉ tiêu', 'Target'], ['chỉ tiêu', 'target'], ['Tỷ trọng QC', 'Ad Share'], ['Hạng trong ngành', 'Class Rank'], ['hạng trong ngành', 'class rank'],
+  ];
+  const metric = v => { for (const [a, b] of METRIC) if (v.includes(a)) v = v.split(a).join(b); return v; };
   const idx = new Map();
-  for (const [k0, v0] of Object.entries(DICT)) { const k = k0.trim(), v = String(v0).trim(); if (k.length < 2) continue; const p = k.slice(0, 2); if (!idx.has(p)) idx.set(p, []); idx.get(p).push([k, v]); }
+  for (const [k0, v0] of Object.entries(DICT)) { const k = k0.trim(), v = metric(String(v0).trim()); if (k.length < 2) continue; const p = k.slice(0, 2); if (!idx.has(p)) idx.set(p, []); idx.get(p).push([k, v]); }
   for (const a of idx.values()) a.sort((x, y) => y[0].length - x[0].length);
   const W = c => !!c && /[A-Za-z0-9_\-]/.test(c);
   const MON = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 }, DOW = { Mon: 'T2', Tue: 'T3', Wed: 'T4', Thu: 'T5', Fri: 'T6', Sat: 'T7', Sun: 'CN' };
@@ -26,13 +39,14 @@
   }
   const ATTRS = ['title', 'aria-label', 'placeholder', 'data-tip', 'data-info'];
   const origT = new WeakMap(), doneT = new WeakMap(), origA = new WeakMap(), doneA = new WeakMap();
-  const skip = el => !el || el.closest('textarea,script,style,[data-notr],.notr,code');
+  const skip = el => !el || el.closest('textarea,script,style,[data-notr],.notr,code,.kpi .lbl,th,svg text,.legend');
+  const skipA = el => !el || el.closest('textarea,script,style,[data-notr],.notr,code');
   function apply(root) {
     const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); let n;
     while ((n = tw.nextNode())) { const v = n.nodeValue; if (doneT.get(n) === v || skip(n.parentElement)) continue;
       origT.set(n, v); const t = tr(v); doneT.set(n, t); if (t !== v) n.nodeValue = t; }
     const els = root.querySelectorAll ? root.querySelectorAll(ATTRS.map(a => `[${a}]`).join(',')) : [];
-    for (const el of els) { if (skip(el)) continue; let o = origA.get(el), d = doneA.get(el); if (!o) { o = {}; d = {}; origA.set(el, o); doneA.set(el, d); }
+    for (const el of els) { if (skipA(el)) continue; let o = origA.get(el), d = doneA.get(el); if (!o) { o = {}; d = {}; origA.set(el, o); doneA.set(el, d); }
       for (const a of ATTRS) { const v = el.getAttribute(a); if (v == null || d[a] === v) continue; o[a] = v; const t = tr(v); d[a] = t; if (t !== v) el.setAttribute(a, t); } }
   }
   function restore(root) {

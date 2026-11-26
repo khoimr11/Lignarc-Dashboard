@@ -15,27 +15,21 @@ async function sel(url, name, depth, seen = new Set()) {
     if (u.kind === 'SCALAR' || u.kind === 'ENUM') parts.push(f.name); else if (u.kind === 'OBJECT' && depth > 0) { const s = await sel(url, u.name, depth - 1, new Set(seen)); if (s) parts.push(`${f.name} { ${s} }`); } }
   return parts.join(' ');
 }
-// 1) legacy getCastleGatePurchaseOrders: every field
-const qt = (await gql(L, '{__schema{queryType{fields{name type{name kind ofType{name kind ofType{name kind}}}}}}}')).data?.__schema?.queryType?.fields || [];
-P('LEGACY query fields:', qt.map(f => f.name).join(', '));
-const cgT = unwrap((qt.find(f => f.name === 'getCastleGatePurchaseOrders') || {}).type || {}).name;
-P('CG type', cgT);
-const s1 = await sel(L, cgT, 2); P('CG selection', s1.slice(0, 3000));
-const r1 = await gql(L, `{ getCastleGatePurchaseOrders(limit: 200, fromDate: "2026-10-15T00:00:00Z", sortOrder: ASC) { ${s1} } }`);
+const QF = (await gql(O, '{__schema{queryType{fields{name args{name type{name kind ofType{name kind ofType{name kind}}}} type{name kind ofType{name kind ofType{name kind ofType{name kind}}}}}}}}')).data.__schema.queryType.fields;
+for (const n of ['getCastleGatePurchaseOrders', 'soCastlegateOrders', 'soCastlegateOrderItem', 'fulfillmentOrderDetails', 'fulfillmentOrderDetailsList', 'castlegatePurchaseOrders', 'soCastlegateRetailers'])
+  { const f = QF.find(x => x.name === n); if (f) P('Q', n, '->', unwrap(f.type).name, 'args', f.args.map(a => a.name + ':' + (unwrap(a.type).name)).join(', ')); }
+const inputT = async n => { const t = (await gql(O, `{__type(name:"${n}"){inputFields{name type{name kind ofType{name kind ofType{name kind}}}}}}`)).data?.__type; return t ? t.inputFields.map(f => f.name + ':' + unwrap(f.type).name).join(', ') : null; };
+for (const n of ['SoCastlegateOrderListFilters', 'FulfillmentOrderDetailsInput', 'FulfillmentOrderDetailsListInput', 'SoCastlegateOrderItemInput']) P('INPUT', n, await inputT(n));
+// getCastleGatePurchaseOrders on the order API: every scalar field
+const cgT = unwrap((QF.find(f => f.name === 'getCastleGatePurchaseOrders') || {}).type || {}).name;
+const s1 = await sel(O, cgT, 2); P('CG type', cgT, 'selection', s1.slice(0, 2500));
+const r1 = await gql(O, `{ getCastleGatePurchaseOrders(limit: 200, fromDate: "2026-10-15T00:00:00Z", sortOrder: ASC) { ${s1} } }`);
 if (r1.errors) P('CG errors', JSON.stringify(r1.errors).slice(0, 1500));
-const pos = r1.data?.getCastleGatePurchaseOrders || [];
-for (const g of [['TT', TT], ['B2B', B2B], ['NORMAL', NORMAL]]) for (const po of g[1]) { const o = pos.find(x => x.poNumber === po); P('CG', g[0], po, o ? JSON.stringify(o).slice(0, 2500) : 'missing'); }
-// field-level diff: fields whose values differ between TT and normal
-const flat = (o, p = '', out = {}) => { for (const [k, v] of Object.entries(o || {})) { if (v && typeof v === 'object' && !Array.isArray(v)) flat(v, p + k + '.', out); else if (Array.isArray(v)) v.forEach((x, i) => typeof x === 'object' ? flat(x, p + k + '[' + i + '].', out) : out[p + k + '[' + i + ']'] = x); else out[p + k] = v; } return out; };
+const pos = r1.data?.getCastleGatePurchaseOrders || []; P('CG count', pos.length);
+const flat = (o, p = '', out = {}) => { for (const [k, v] of Object.entries(o || {})) { if (v && typeof v === 'object' && !Array.isArray(v)) flat(v, p + k + '.', out); else if (Array.isArray(v)) v.forEach((x, i) => x && typeof x === 'object' ? flat(x, p + k + '[' + i + '].', out) : out[p + k + '[' + i + ']'] = x); else out[p + k] = v; } return out; };
 const F = po => flat(pos.find(x => x.poNumber === po));
+for (const po of [TT[0], B2B[0], NORMAL[0]]) P('CG sample', po, JSON.stringify(pos.find(x => x.poNumber === po) || null).slice(0, 2500));
 const keys = new Set(pos.flatMap(o => Object.keys(flat(o))));
-for (const k of keys) { const tv = TT.map(p => F(p)[k]), nv = NORMAL.map(p => F(p)[k]), bv = B2B.map(p => F(p)[k]); const st = v => JSON.stringify([...new Set(v.map(String))]); if (st(tv) !== st(nv) || st(bv) !== st(nv)) P('DIFF', k, 'TT', st(tv), 'B2B', st(bv), 'N', st(nv)); }
-// 2) supplier-order-api: SoCastlegateOrder node fields for the same POs
-const qt2 = (await gql(O, '{__schema{queryType{fields{name}}}}')).data?.__schema?.queryType?.fields || []; P('ORDER_API query fields:', qt2.map(f => f.name).join(', '));
-const nodeT = (await gql(O, '{__type(name:"SoCastlegateOrderList"){fields{name type{name kind ofType{name kind ofType{name kind ofType{name kind}}}}}}}')).data?.__type;
-P('SoCastlegateOrderList', JSON.stringify(nodeT).slice(0, 800));
-const nodeName = nodeT ? unwrap((nodeT.fields.find(f => f.name === 'nodes') || {}).type || {}).name : null; P('node type', nodeName);
-if (nodeName) { const s2 = await sel(O, nodeName, 2); P('SO selection', s2.slice(0, 3000));
-  const fl = (await gql(O, '{__type(name:"SoCastlegateOrderListFilters"){inputFields{name type{name kind ofType{name kind}}}}}')).data?.__type; P('filters', JSON.stringify(fl).slice(0, 1500));
-  for (const po of [...TT, ...B2B.slice(0, 3), ...NORMAL.slice(0, 2)]) { const r = await gql(O, `query($f: SoCastlegateOrderListFilters!){ soCastlegateOrders { orderListByFilters(filters:$f){ nodes { ${s2} } } } }`, { f: { retailerPurchaseOrderNumbers: [po], page: 1, pageSize: 5 } });
-    P('SO', po, JSON.stringify(r.errors || r.data).slice(0, 2500)); } }
+for (const k of keys) { const st = v => JSON.stringify([...new Set(v.map(String))]); const tv = st(TT.map(p => F(p)[k])), nv = st(NORMAL.map(p => F(p)[k])), bv = st(B2B.map(p => F(p)[k])); if (tv !== nv || bv !== nv) P('DIFF', k, 'TT', tv, 'B2B', bv, 'N', nv); }
+// soCastlegateOrders / order item / fulfillment details
+for (const n of ['soCastlegateOrders', 'soCastlegateOrderItem', 'fulfillmentOrderDetails', 'fulfillmentOrderDetailsList']) { const f = QF.find(x => x.name === n); if (!f) continue; const tn = unwrap(f.type).name; P('TYPE', n, tn, (await sel(O, tn, 3)).slice(0, 2500)); }
