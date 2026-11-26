@@ -21,7 +21,7 @@ for (const n of ['SoCastlegateBillingType', 'SoCastlegateOrderSource', 'SoCastle
 const all = [...TT, ...B2B, ...NORMAL];
 // A) getCastleGatePurchaseOrders by PO numbers, non-PII fields only
 for (const sel1 of ['poNumber salesChannelName orderType source deliveryMethodCode storePrefix products { partNumber price event { id type name startDate endDate } customComment }', 'poNumber salesChannelName orderType source', 'poNumber salesChannelName orderType']) {
-  const r = await gql(O, `query($p: String){ getCastleGatePurchaseOrders(poNumbers: $p, limit: 50) { ${sel1} } }`, { p: all.join(',') });
+  const r = await gql(O, `query($p: [String!]){ getCastleGatePurchaseOrders(poNumbers: $p, limit: 50) { ${sel1} } }`, { p: all });
   if (r.errors) { P('CG-PO err', sel1.slice(0, 40), JSON.stringify(r.errors).slice(0, 400)); continue; }
   for (const o of r.data.getCastleGatePurchaseOrders || []) P('CG-PO', TT.includes(o.poNumber) ? 'TT ' : B2B.includes(o.poNumber) ? 'B2B' : 'N  ', JSON.stringify(o).slice(0, 900));
   break;
@@ -33,11 +33,17 @@ const lst = SQ && SQ.fields.find(f => f.name === 'orderListByFilters');
 if (lst) { const lt = unwrap(lst.type).name, LT = (await gql(O, `{__type(name:"${lt}"){fields{name type{name kind ofType{name kind ofType{name kind}}}}}}`)).data.__type, nodeName = unwrap(LT.fields.find(f => f.name === 'nodes').type).name;
   const s2 = await sel(O, nodeName, 2); P('SO node', nodeName, s2.slice(0, 2000));
   const s2np = s2.split(' ').filter(w => !PII.test(w)).join(' ');
-  for (const po of all) { const r = await gql(O, `query($f: SoCastlegateOrderListFilters!){ soCastlegateOrders { orderListByFilters(filters:$f){ nodes { ${s2} } } } }`, { f: { supplierId: '467016', purchaseOrderNumbers: po, page: 1, pageSize: 5 } });
+  for (const po of all) { const r = await gql(O, `query($f: SoCastlegateOrderListFilters!){ soCastlegateOrders { orderListByFilters(filters:$f){ nodes { ${s2} } } } }`, { f: { includePendingOrders: true, supplierId: '467016', purchaseOrderNumbers: [po], page: 1, pageSize: 5 } });
     if (r.errors) { P('SO err', po, JSON.stringify(r.errors).slice(0, 500)); continue; }
     const nodes = r.data.soCastlegateOrders.orderListByFilters.nodes || [];
     const strip = o => JSON.parse(JSON.stringify(o, (k, v) => PII.test(k) && typeof v !== 'object' ? undefined : v));
     P('SO', TT.includes(po) ? 'TT ' : B2B.includes(po) ? 'B2B' : 'N  ', po, JSON.stringify(nodes.map(strip)).slice(0, 1800)); } }
+// B2) order detail (item level): every field
+{ const dt = (await sel(O, 'SoCastlegateOrderDetail', 3)); P('SO detail sel', dt.slice(0, 3000));
+  const dsel = dt.split(' ').filter(w => !PII.test(w) || w === '{' || w === '}').join(' ');
+  for (const po of [TT[0], TT[3], B2B[0], NORMAL[0]]) { const r = await gql(O, `query($f: SoCastlegateOrderListFilters!){ soCastlegateOrders { orderDetailsByFilters(filters:$f){ ${dt} } } }`, { f: { includePendingOrders: true, supplierId: '467016', purchaseOrderNumbers: [po], page: 1, pageSize: 5 } });
+    const strip = o => JSON.parse(JSON.stringify(o, (k, v) => PII.test(k) && typeof v !== 'object' ? undefined : v));
+    P('SO detail', TT.includes(po) ? 'TT ' : B2B.includes(po) ? 'B2B' : 'N  ', po, JSON.stringify(r.errors || strip(r.data)).slice(0, 2500)); } }
 // C) fulfillment order list (multichannel) — just the retailer and billingType values
-const fr = await gql(O, `query($i: FulfillmentOrderDetailsListInput){ fulfillmentOrderDetailsList(orderDetailsListInput:$i){ pageInfo { totalItems } nodes { fulfillmentOrder { requestId billingType status retailer { name orderNumber } orderDate } } } }`, { i: { supplierId: 467016, pageSize: 20, page: 1 } });
+const fr = await gql(O, `query($i: FulfillmentOrderDetailsListInput!){ fulfillmentOrderDetailsList(orderDetailsListInput:$i){ pageInfo { totalItems } nodes { fulfillmentOrder { requestId billingType status retailer { name orderNumber } orderDate } } } }`, { i: { supplierId: 467016, pageSize: 20, page: 1 } });
 P('FO', JSON.stringify(fr.errors || fr.data).slice(0, 1500));
