@@ -355,3 +355,9 @@ Object.assign(window.LG_VI, {
   'for returns; full refund for damage without replacement parts).': 'với hoàn hàng; hoàn toàn bộ cho hư hỏng không có linh kiện thay thế).', 'paid by the flat DDA allowance, not per incident.': 'chi trả bằng khoản DDA cố định, không theo từng vụ.',
   'customers can see but not buy them. If Amazon is a': 'khách thấy được nhưng không mua được. Nếu Amazon là', 'of the region\'s revenue; best-selling size by revenue': 'doanh thu của khu vực; kích thước bán chạy nhất theo doanh thu',
 });
+Object.assign(window.LG_VI, {
+  'Wayfair listing sells through ads at a loss': 'Listing Wayfair đang bán qua quảng cáo với mức lỗ', 'Wayfair listings sell through ads at a loss': 'Listing Wayfair đang bán qua quảng cáo với mức lỗ',
+  'actions': 'hành động', 'action': 'hành động', 'month': 'tháng', '/ month': '/ tháng', 'after': 'sau', 'promotion': 'khuyến mãi', 'returns': 'hoàn hàng', 'return': 'hoàn hàng',
+  'COGS from the PO layer each unit came from': 'COGS theo lớp PO của từng sp', 'fulfillment from the CastleGate invoice': 'fulfillment theo hóa đơn CastleGate', '* = rate of the same carton class, not invoiced yet)': '* = theo đơn giá cùng loại thùng, chưa có hóa đơn)',
+  'ads from the Wayfair SKU report': 'Ad Spend từ báo cáo SKU Wayfair', 'incidents': 'sự cố', 'Profit by SKU': 'Profit theo SKU',
+});

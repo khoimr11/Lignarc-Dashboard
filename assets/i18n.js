@@ -8,7 +8,7 @@
     ['Biên lợi nhuận góp', 'Contribution Margin'], ['biên lợi nhuận góp', 'contribution margin'], ['Lợi nhuận góp trước QC', 'Contribution before Ads'], ['lợi nhuận góp trước QC', 'contribution before ads'], ['Lợi nhuận góp', 'Contribution'], ['lợi nhuận góp', 'contribution'],
     ['Biên lợi nhuận', 'Margin'], ['biên lợi nhuận', 'margin'], ['Lãi sau QC', 'Profit after Ads'], ['lãi sau QC', 'profit after ads'], ['Lợi nhuận', 'Profit'], ['lợi nhuận', 'profit'],
     ['Doanh thu thuần', 'Net Revenue'], ['doanh thu thuần', 'net revenue'], ['Doanh số thuần', 'Net Sales'], ['doanh số thuần', 'net sales'], ['Doanh thu', 'Revenue'], ['doanh thu', 'revenue'],
-    ['Chi tiêu QC', 'Ad Spend'], ['chi tiêu QC', 'ad spend'], ['Doanh số QC', 'Ad Sales'], ['doanh số QC', 'ad sales'], ['Đơn QC', 'Ad Orders'], ['đơn QC', 'ad orders'], ['Chi tiêu lãng phí', 'Wasted Spend'], ['chi tiêu lãng phí', 'wasted spend'],
+    ['Chi tiêu QC', 'Ad Spend'], ['chi tiêu QC', 'ad spend'], ['Doanh số QC', 'Ad Sales'], ['doanh số QC', 'ad sales'], ['Đơn QC', 'Ad Orders'], ['mỗi đơn QC', 'mỗi Ad Order'], ['đơn QC', 'ad orders'], ['Chi tiêu lãng phí', 'Wasted Spend'], ['chi tiêu lãng phí', 'wasted spend'],
     ['Chi phí mỗi đơn QC', 'Cost per Ad Order'], ['Chi phí mỗi đơn', 'Cost per Order'], ['Giá trị đơn TB', 'AOV'], ['CPC tối đa còn lãi', 'Max profitable CPC'],
     ['ACoS hòa vốn', 'Break-even ACoS'], ['CPA hòa vốn', 'Break-even CPA'], ['TACoS hòa vốn', 'Break-even TACoS'], ['ROAS hòa vốn', 'Break-even ROAS'], ['ACoS mục tiêu', 'Target ACoS'], ['Hòa vốn', 'Break-even'], ['hòa vốn', 'break-even'],
     ['Giá vốn', 'COGS'], ['giá vốn', 'COGS'], ['Phí sàn', 'Platform Fees'], ['phí sàn', 'platform fees'], ['Lượt hiển thị', 'Impressions'], ['lượt hiển thị', 'impressions'], ['Tỷ lệ chuyển đổi', 'Conversion Rate'], ['tỷ lệ chuyển đổi', 'conversion rate'],
@@ -24,6 +24,7 @@
   const dates = s => s
     .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2})(?:,? (\d{4}))?\b/g, (m, mo, d, y) => `${d}/${MON[mo]}${y ? '/' + y : ''}`)
     .replace(/\b(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b(?:[ ’'](\d{2,4}))?/g, (m, mo, y) => `Th${MON[mo]}${y ? '/' + y : ''}`)
+    .replace(/(\d+) of (\d+)\b/g, '$1/$2')
     .replace(/\bWk (?=\d)/g, 'Tuần ').replace(/\bWeek of (?=\d)/g, 'Tuần ')
     .replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/g, m => DOW[m]);
   function tr(s) {
