@@ -91,12 +91,13 @@ function build() {
   for (const po of pos) for (const [part, qty, fob, cogs] of po.items || []) { const un = (po.unload && po.unload[part]) || 0; (layers[part] = layers[part] || []).push({ po: po.id, qty, left: qty, fob, cogs: cogs + un, sheet: cogs, unload: un, recv: po.recv }); }
   const lastCost = part => { const L = layers[part]; if (L && L.length) return L[L.length - 1]; const fam = P[part] && P[part].fam; for (const k in layers) if (P[k] && P[k].fam === fam) return layers[k][layers[k].length - 1]; return { cogs: 0, fob: 0 }; };
   const prod = part => P[part] || { col: 'Other', cat: 'Other', type: 'Other', size: null, color: null, name: part, base: 0 };
-  const SOV = W.statusOv || {}, TT = new Set(W.ttPOs || []);
+  // Tried & True: the API sales channel reads "Review for Free Samples" (Partner Home export shows "Tried&True"); W.ttPOs is a manual fallback
+  const SOV = W.statusOv || {}, TT = new Set(W.ttPOs || []), TT_RE = /tried\s*&?\s*true|free\s*sample/i;
   const lines = [];
   for (const r of W.orders || []) {
     const status = SOV[r[0]] || r[3]; const p = prod(r[7]); const qty = +r[11] || 0, price = +r[12] || 0, base = p.base || price;
     const ts = r[17] || null, hd = ts ? etHourDow(ts) : null;
-    lines.push({ ch: 'wf', po: r[0], date: ts ? vnDay(ts) : r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: /tried/i.test(r[14] || '') || TT.has(r[0]) });
+    lines.push({ ch: 'wf', po: r[0], date: ts ? vnDay(ts) : r[2], ts, hour: hd ? hd.h : null, dow: hd ? hd.dow : null, status, ok: OK_STATUS(status), retailer: r[4] || 'Wayfair', state: r[5], country: r[6] || 'US', part: r[7], qty, price, base, b2b: /yes/i.test(r[13] || ''), tt: TT_RE.test(r[14] || '') || TT.has(r[0]) });
   }
   // Amazon (Seller Central, FBM shipped by CastleGate Multichannel): exact money from the SP-API Finances transactions
   const FIN = (D.amz && D.amz.fin) || [], finBy = {}, amzSvc = [];

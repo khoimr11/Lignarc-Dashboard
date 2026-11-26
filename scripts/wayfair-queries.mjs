@@ -116,6 +116,19 @@ export default async function wayfair({ gql, http, tok }) {
         if (L.length < 100 || newest === from) break; from = newest; await sleep(300);
       }
     }
+    // The legacy endpoint reports every PO as sales channel "Wayfair". The supplier-order API, asked per PO with hasResponse:false,
+    // returns the real channel ("Review for Free Samples" = Tried & True, "Wayfair Canada", …) and orderType (B2B). Verified 26/11 against
+    // the Partner Home CastleGate export: all Tried & True and B2B POs match.
+    const pos = [...new Set([...seen.values()].map(r => r[0]))], chan = new Map();
+    const Q_PO = `query($p: [String!], $h: Boolean){ getCastleGatePurchaseOrders(poNumbers: $p, hasResponse: $h, limit: 100) { poNumber salesChannelName orderType } }`;
+    const take = L => { for (const o of L || []) if (o && o.poNumber && o.salesChannelName != null) chan.set(o.poNumber, [o.salesChannelName, o.orderType]); };
+    for (let i = 0; i < pos.length; i += 25) { for (const h of [false, true]) { try { const d = await q(ORDER_API, Q_PO, { p: pos.slice(i, i + 25), h }); take(d.getCastleGatePurchaseOrders); } catch (e) { console.log('  wayfair channel batch', e.message.slice(0, 120)); } } await sleep(200); }
+    // anything the batch call did not return: one PO at a time
+    for (const po of pos.filter(p => !chan.has(p))) { for (const h of [false, true]) { if (chan.has(po)) break; try { const d = await q(ORDER_API, Q_PO, { p: [po], h }); take(d.getCastleGatePurchaseOrders); } catch (e) { } } await sleep(120); }
+    const miss = pos.filter(p => !chan.has(p));
+    if (miss.length) err.channel = `sales channel not found for ${miss.length} PO(s): ${miss.slice(0, 10).join(', ')}`;
+    for (const r of seen.values()) { const c = chan.get(r[0]); if (!c) continue; r[14] = c[0] || r[14]; if (/b2b/i.test(c[1] || '')) r[13] = 'Yes'; }
+    console.log('  wayfair channel', chan.size + '/' + pos.length, 'POs ·', [...chan.values()].filter(c => /free sample|tried/i.test(c[0])).length, 'Tried & True');
     return [...seen.values()];
   });
   delete out.statuses;
